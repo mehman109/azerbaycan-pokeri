@@ -28,7 +28,11 @@ import {
   Gift,
   Clock,
   Coins,
-  LogOut
+  LogOut,
+  ShieldCheck,
+  ArrowDownRight,
+  ArrowUpRight,
+  Wallet
 } from 'lucide-react';
 
 interface LobbyViewProps {
@@ -36,6 +40,7 @@ interface LobbyViewProps {
   lang: Language;
   onJoinTable: (table: PokerTableState, observeOnly?: boolean) => void;
   onOpenCreateTable: () => void;
+  onOpenAdminPanel?: () => void;
   onOpenAuth: () => void;
   onLogout?: () => void;
   tables: PokerTableState[];
@@ -46,11 +51,13 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   lang,
   onJoinTable,
   onOpenCreateTable,
+  onOpenAdminPanel,
   onOpenAuth,
   onLogout,
   tables,
 }) => {
   const t = translations[lang];
+  const isAdmin = user && (user.isAdmin || user.username === 'ADMIN');
 
   // Daily deterministic base count (different count each day)
   const getDailyBaseCount = () => {
@@ -189,6 +196,42 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
 
   return (
     <div className="w-full max-w-7xl mx-auto px-3 sm:px-6 py-6 space-y-6">
+      {/* ADMIN EXCLUSIVE QUICK CONTROL BANNER */}
+      {isAdmin && onOpenAdminPanel && (
+        <div className="bg-gradient-to-r from-amber-950/90 via-zinc-900 to-amber-950/90 border-2 border-amber-400/60 rounded-2xl p-4 shadow-2xl shadow-amber-950/50 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center space-x-3 text-left w-full sm:w-auto">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 p-0.5 shadow-lg flex items-center justify-center text-zinc-950 font-black shrink-0">
+              <ShieldCheck className="w-6 h-6 stroke-[2.5]" />
+            </div>
+            <div>
+              <div className="flex items-center space-x-2">
+                <span className="text-sm sm:text-base font-black text-amber-300 tracking-wide uppercase">
+                  Salam, Baş Admin! 👑
+                </span>
+                <span className="text-[10px] bg-amber-500 text-zinc-950 font-black px-2 py-0.5 rounded-full uppercase">
+                  Sistem Aktivdir
+                </span>
+              </div>
+              <p className="text-xs text-zinc-300 mt-0.5">
+                Bütün oyunçuları, qeydiyyatları, depozit çeklərini, balansları və kassa parametrlərini idarə edin.
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              soundManager.playButtonClick();
+              onOpenAdminPanel();
+            }}
+            id="lobby_open_admin_panel_btn"
+            className="w-full sm:w-auto px-5 py-2.5 bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-black text-xs sm:text-sm rounded-xl shadow-lg shadow-amber-500/30 flex items-center justify-center space-x-2 transition-all active:scale-95 cursor-pointer whitespace-nowrap"
+          >
+            <ShieldCheck className="w-4 h-4 stroke-[2.5]" />
+            <span>İdarəetmə Panelini Aç</span>
+          </button>
+        </div>
+      )}
+
       {/* Top Banner Stats & Bad Beat Jackpot */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Bad Beat Jackpot Banner with Golden Letters & $1000 */}
@@ -389,22 +432,6 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
               <Zap className="w-3.5 h-3.5 fill-current" />
               <span>{lang === 'az' ? 'Sürətli Masa Seçimi' : 'Quick Seat'}</span>
             </button>
-
-            {/* Logout / Giriş Ekranına Qayıt Button for logged-in users */}
-            {user && onLogout && (
-              <button
-                onClick={() => {
-                  soundManager.playButtonClick();
-                  onLogout();
-                }}
-                id="lobby_logout_btn"
-                className="flex items-center space-x-1.5 px-3 py-1.5 bg-gradient-to-r from-red-950/80 to-zinc-900 hover:from-red-900/90 hover:to-zinc-850 border border-red-800/50 hover:border-red-600 text-red-300 hover:text-white text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95 cursor-pointer"
-                title={lang === 'az' ? 'Hesabdan çıxış et və giriş/qeydiyyat ekranına qayıt' : 'Log out to sign-in / registration screen'}
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>{lang === 'az' ? 'Çıxış (Giriş Ekranına Qayıt)' : 'Logout'}</span>
-              </button>
-            )}
           </div>
         </div>
 

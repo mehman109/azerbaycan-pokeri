@@ -11,15 +11,17 @@ import {
 } from 'firebase/auth';
 import { 
   getFirestore, 
+  initializeFirestore,
   doc, 
   getDoc, 
   setDoc, 
   updateDoc, 
   collection, 
   query, 
-  where,
-  getDocs,
-  serverTimestamp
+  where, 
+  getDocs, 
+  onSnapshot,
+  serverTimestamp 
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { UserProfile, CurrencyType, GOLDEN_ACE_AVATAR } from '../types/poker';
@@ -42,7 +44,19 @@ const app = getApps().length > 0 ? getApp() : initializeApp({
 });
 
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
+
+// Use initializeFirestore with auto-detect long polling for reliable connectivity in all browser environments
+export const db = (() => {
+  const dbId = firebaseConfig.firestoreDatabaseId || '(default)';
+  try {
+    return initializeFirestore(app, {
+      experimentalAutoDetectLongPolling: true,
+    }, dbId);
+  } catch {
+    return getFirestore(app, dbId);
+  }
+})();
+
 export const googleProvider = new GoogleAuthProvider();
 
 const LOCAL_STORAGE_KEY = 'royal_poker_auth_user';
@@ -350,3 +364,203 @@ export async function updateUserBalanceInFirebase(
     console.warn('Error updating balance in Firestore:', err);
   }
 }
+
+// Fetch all registered users from Firestore for Admin Panel
+export async function fetchAllUsersFromFirestore(): Promise<UserProfile[]> {
+  try {
+    const usersRef = collection(db, 'users');
+    const snap = await getDocs(usersRef);
+    const users: UserProfile[] = [];
+    snap.forEach((d) => {
+      const data = d.data() as UserProfile;
+      users.push({
+        ...data,
+        id: data.id || d.id
+      });
+    });
+    return users;
+  } catch (err) {
+    console.warn('Error fetching all users from Firestore:', err);
+    return [];
+  }
+}
+
+// Update user by Admin in Firestore
+export async function adminUpdateUserInFirestore(userId: string, updates: Partial<UserProfile>) {
+  try {
+    const userRef = doc(db, 'users', userId);
+    await updateDoc(userRef, updates);
+  } catch (err) {
+    console.warn('Error admin updating user in Firestore:', err);
+  }
+}
+
+// Save deposit request to Firestore
+export async function saveDepositToFirestore(deposit: any) {
+  try {
+    const depRef = doc(db, 'deposits', deposit.id);
+    await setDoc(depRef, {
+      ...deposit,
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    console.warn('Error saving deposit to Firestore:', err);
+  }
+}
+
+// Fetch all deposits from Firestore
+export async function fetchAllDepositsFromFirestore(): Promise<any[]> {
+  try {
+    const depsRef = collection(db, 'deposits');
+    const snap = await getDocs(depsRef);
+    const list: any[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      list.push({ ...data, id: data.id || d.id });
+    });
+    return list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch (err) {
+    console.warn('Error fetching deposits from Firestore:', err);
+    return [];
+  }
+}
+
+// Update deposit status in Firestore
+export async function updateDepositStatusInFirestore(depositId: string, status: 'completed' | 'rejected') {
+  try {
+    const depRef = doc(db, 'deposits', depositId);
+    await updateDoc(depRef, { status, updatedAt: serverTimestamp() });
+  } catch (err) {
+    console.warn('Error updating deposit in Firestore:', err);
+  }
+}
+
+// Save withdrawal request to Firestore
+export async function saveWithdrawalToFirestore(withdrawal: any) {
+  try {
+    const withRef = doc(db, 'withdrawals', withdrawal.id);
+    await setDoc(withRef, {
+      ...withdrawal,
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    console.warn('Error saving withdrawal to Firestore:', err);
+  }
+}
+
+// Fetch all withdrawals from Firestore
+export async function fetchAllWithdrawalsFromFirestore(): Promise<any[]> {
+  try {
+    const withsRef = collection(db, 'withdrawals');
+    const snap = await getDocs(withsRef);
+    const list: any[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      list.push({ ...data, id: data.id || d.id });
+    });
+    return list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch (err) {
+    console.warn('Error fetching withdrawals from Firestore:', err);
+    return [];
+  }
+}
+
+// Update withdrawal status in Firestore
+export async function updateWithdrawalStatusInFirestore(withdrawalId: string, status: 'approved' | 'rejected') {
+  try {
+    const withRef = doc(db, 'withdrawals', withdrawalId);
+    await updateDoc(withRef, { status, updatedAt: serverTimestamp() });
+  } catch (err) {
+    console.warn('Error updating withdrawal in Firestore:', err);
+  }
+}
+
+// Save system config to Firestore
+export async function saveSystemConfigToFirestore(cfg: any) {
+  try {
+    const cfgRef = doc(db, 'system_config', 'main');
+    await setDoc(cfgRef, { ...cfg, updatedAt: serverTimestamp() });
+  } catch (err) {
+    console.warn('Error saving system config to Firestore:', err);
+  }
+}
+
+// Fetch system config from Firestore
+export async function fetchSystemConfigFromFirestore(): Promise<any | null> {
+  try {
+    const cfgRef = doc(db, 'system_config', 'main');
+    const snap = await getDoc(cfgRef);
+    if (snap.exists()) {
+      return snap.data();
+    }
+    return null;
+  } catch (err) {
+    console.warn('Error fetching system config from Firestore:', err);
+    return null;
+  }
+}
+
+// Real-time Firestore Listeners for Admin Dashboard
+export function subscribeToRealtimeAdminData(callbacks: {
+  onUsersChange?: (users: UserProfile[]) => void;
+  onDepositsChange?: (deposits: any[]) => void;
+  onWithdrawalsChange?: (withdrawals: any[]) => void;
+}) {
+  const unsubs: (() => void)[] = [];
+
+  try {
+    // 1. Users real-time listener
+    const usersRef = collection(db, 'users');
+    const unsubUsers = onSnapshot(usersRef, (snap) => {
+      const users: UserProfile[] = [];
+      snap.forEach((d) => {
+        const data = d.data() as UserProfile;
+        users.push({ ...data, id: data.id || d.id });
+      });
+      if (callbacks.onUsersChange) {
+        callbacks.onUsersChange(users);
+      }
+    }, (err) => console.warn('Users snapshot listener error:', err));
+    unsubs.push(unsubUsers);
+
+    // 2. Deposits real-time listener
+    const depositsRef = collection(db, 'deposits');
+    const unsubDeps = onSnapshot(depositsRef, (snap) => {
+      const deposits: any[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        deposits.push({ ...data, id: data.id || d.id });
+      });
+      deposits.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      if (callbacks.onDepositsChange) {
+        callbacks.onDepositsChange(deposits);
+      }
+    }, (err) => console.warn('Deposits snapshot listener error:', err));
+    unsubs.push(unsubDeps);
+
+    // 3. Withdrawals real-time listener
+    const withRef = collection(db, 'withdrawals');
+    const unsubWiths = onSnapshot(withRef, (snap) => {
+      const withdrawals: any[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        withdrawals.push({ ...data, id: data.id || d.id });
+      });
+      withdrawals.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      if (callbacks.onWithdrawalsChange) {
+        callbacks.onWithdrawalsChange(withdrawals);
+      }
+    }, (err) => console.warn('Withdrawals snapshot listener error:', err));
+    unsubs.push(unsubWiths);
+  } catch (err) {
+    console.warn('Error subscribing to realtime admin data:', err);
+  }
+
+  return () => {
+    unsubs.forEach(unsub => {
+      try { unsub(); } catch {}
+    });
+  };
+}
+
+

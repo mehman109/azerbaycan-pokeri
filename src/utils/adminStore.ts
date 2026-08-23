@@ -55,138 +55,15 @@ const DEFAULT_CONFIG: SystemConfig = {
   isMaintenanceMode: false,
 };
 
-const DEFAULT_PLAYERS: UserProfile[] = [
-  {
-    id: 'usr_poker_vip_1',
-    username: 'PokerMasterAZ',
-    email: 'vip.player@pokerarena.pro',
-    avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-    currency: 'USD',
-    realBalance: 150.00,
-    bonusBalance: 5.00,
-    hasClaimedSpecialBonus: true,
-    bonusQuestStartTime: Date.now() - 3600000 * 3,
-    bonusTurnoverCompleted: false,
-    playMoneyBalance: 50000,
-    activeCurrencyMode: 'real',
-    vipLevel: 3,
-    vipXp: 1420,
-    is2FAEnabled: false,
-    totalHandsPlayed: 142,
-    handsWon: 68,
-    biggestPotWon: 1250,
-    createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-  },
-  {
-    id: 'usr_201_elvin',
-    username: 'Elvin_Baku',
-    email: 'elvin.aliyev@gmail.com',
-    avatar: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?w=150&auto=format&fit=crop&q=80',
-    currency: 'USD',
-    realBalance: 320.50,
-    bonusBalance: 0.00,
-    hasClaimedSpecialBonus: true,
-    bonusQuestStartTime: Date.now() - 86400000 * 2,
-    bonusTurnoverCompleted: true,
-    playMoneyBalance: 120000,
-    activeCurrencyMode: 'real',
-    vipLevel: 4,
-    vipXp: 2850,
-    is2FAEnabled: true,
-    totalHandsPlayed: 420,
-    handsWon: 198,
-    biggestPotWon: 2800,
-    createdAt: new Date(Date.now() - 86400000 * 12).toISOString(),
-  },
-  {
-    id: 'usr_202_leyla',
-    username: 'Leyla_PokerQueen',
-    email: 'leyla.m@mail.ru',
-    avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
-    currency: 'USD',
-    realBalance: 75.00,
-    bonusBalance: 5.00,
-    hasClaimedSpecialBonus: true,
-    bonusQuestStartTime: Date.now() - 3600000 * 10,
-    bonusTurnoverCompleted: false,
-    playMoneyBalance: 35000,
-    activeCurrencyMode: 'real',
-    vipLevel: 2,
-    vipXp: 620,
-    is2FAEnabled: false,
-    totalHandsPlayed: 88,
-    handsWon: 36,
-    biggestPotWon: 450,
-    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-  },
-  {
-    id: 'usr_203_rashad',
-    username: 'Rashad_Shark',
-    email: 'rashad99@box.az',
-    avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
-    currency: 'USD',
-    realBalance: 1250.00,
-    bonusBalance: 0.00,
-    hasClaimedSpecialBonus: true,
-    bonusQuestStartTime: Date.now() - 86400000 * 15,
-    bonusTurnoverCompleted: true,
-    playMoneyBalance: 850000,
-    activeCurrencyMode: 'real',
-    vipLevel: 6,
-    vipXp: 9400,
-    is2FAEnabled: true,
-    totalHandsPlayed: 1240,
-    handsWon: 610,
-    biggestPotWon: 7400,
-    createdAt: new Date(Date.now() - 86400000 * 30).toISOString(),
-  },
-  {
-    id: 'usr_204_aysel',
-    username: 'Aysel_VIP',
-    email: 'aysel.h@yahoo.com',
-    avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-    currency: 'USD',
-    realBalance: 50.00,
-    bonusBalance: 5.00,
-    hasClaimedSpecialBonus: true,
-    bonusQuestStartTime: Date.now() - 3600000 * 1,
-    bonusTurnoverCompleted: false,
-    playMoneyBalance: 18000,
-    activeCurrencyMode: 'real',
-    vipLevel: 1,
-    vipXp: 110,
-    is2FAEnabled: false,
-    totalHandsPlayed: 25,
-    handsWon: 11,
-    biggestPotWon: 210,
-    createdAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-  },
-];
+const DEFAULT_PLAYERS: UserProfile[] = [];
 
-const DEFAULT_WITHDRAWALS: AdminWithdrawalRequest[] = [
-  {
-    id: 'wth_7812',
-    userId: 'usr_201_elvin',
-    username: 'Elvin_Baku',
-    cardNumber: '4169 7388 9912 3456',
-    bankName: 'Kapital Bank (BirBank)',
-    amount: 120.00,
-    currency: 'USD',
-    status: 'pending',
-    createdAt: Date.now() - 3600000 * 1.5,
-  },
-  {
-    id: 'wth_7811',
-    userId: 'usr_203_rashad',
-    username: 'Rashad_Shark',
-    cardNumber: '5102 8844 1239 8871',
-    bankName: 'ABB Bank (TamKart)',
-    amount: 500.00,
-    currency: 'USD',
-    status: 'approved',
-    createdAt: Date.now() - 86400000 * 1.2,
-  },
-];
+const DEFAULT_WITHDRAWALS: AdminWithdrawalRequest[] = [];
+
+// Helper to filter out legacy mock/sample data
+function isMockUserOrWithdrawal(id?: string): boolean {
+  if (!id) return false;
+  return id.startsWith('usr_poker_vip_') || id.startsWith('usr_201_') || id.startsWith('usr_202_') || id.startsWith('usr_203_') || id.startsWith('usr_204_') || id === 'wth_7812' || id === 'wth_7811';
+}
 
 export const adminStorage = {
   getConfig: (): SystemConfig => {
@@ -210,22 +87,31 @@ export const adminStorage = {
   getRegisteredPlayers: (): UserProfile[] => {
     try {
       const saved = localStorage.getItem('royal_poker_all_players');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          // filter out mock users
+          const clean = parsed.filter(p => !isMockUserOrWithdrawal(p.id));
+          return clean;
+        }
+      }
     } catch {
       // ignore
     }
-    return DEFAULT_PLAYERS;
+    return [];
   },
 
   saveRegisteredPlayers: (players: UserProfile[]) => {
     try {
-      localStorage.setItem('royal_poker_all_players', JSON.stringify(players));
+      const clean = players.filter(p => !isMockUserOrWithdrawal(p.id));
+      localStorage.setItem('royal_poker_all_players', JSON.stringify(clean));
     } catch {
       // ignore
     }
   },
 
   registerNewPlayer: (player: UserProfile) => {
+    if (isMockUserOrWithdrawal(player.id)) return;
     const list = adminStorage.getRegisteredPlayers();
     const existingIndex = list.findIndex((p) => p.id === player.id || p.email === player.email);
     if (existingIndex >= 0) {
@@ -254,16 +140,23 @@ export const adminStorage = {
   getWithdrawals: (): AdminWithdrawalRequest[] => {
     try {
       const saved = localStorage.getItem('royal_poker_withdrawals');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter(w => !isMockUserOrWithdrawal(w.id));
+          return clean;
+        }
+      }
     } catch {
       // ignore
     }
-    return DEFAULT_WITHDRAWALS;
+    return [];
   },
 
   saveWithdrawals: (wths: AdminWithdrawalRequest[]) => {
     try {
-      localStorage.setItem('royal_poker_withdrawals', JSON.stringify(wths));
+      const clean = wths.filter(w => !isMockUserOrWithdrawal(w.id));
+      localStorage.setItem('royal_poker_withdrawals', JSON.stringify(clean));
     } catch {
       // ignore
     }

@@ -27,7 +27,7 @@ import { soundManager } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
 import { adminStorage } from '../utils/adminStore';
 import { DepositPaymentModal } from './DepositPaymentModal';
-import { updateUserBalanceInFirebase } from '../services/firebase';
+import { updateUserBalanceInFirebase, saveDepositToFirestore, saveWithdrawalToFirestore } from '../services/firebase';
 
 interface PendingDeposit {
   id: string;
@@ -241,9 +241,8 @@ export const CashierModal: React.FC<CashierModalProps> = ({
     };
     setTransactions([newTx, ...transactions]);
 
-    // Record in Admin storage
-    const adminDeps = adminStorage.getPendingDeposits();
-    adminDeps.unshift({
+    // Record in Admin storage & Firestore
+    const depRecord = {
       id: `dep_${Date.now()}`,
       userId: user.id,
       username: user.username,
@@ -253,9 +252,12 @@ export const CashierModal: React.FC<CashierModalProps> = ({
       receiptPreviewUrl: previewUrl,
       createdAt: verifiedTime,
       targetTimestamp: verifiedTime,
-      status: 'completed',
-    });
+      status: 'completed' as const,
+    };
+    const adminDeps = adminStorage.getPendingDeposits();
+    adminDeps.unshift(depRecord);
     adminStorage.savePendingDeposits(adminDeps);
+    saveDepositToFirestore(depRecord);
 
     // Clear input
     setDepositInput('');
@@ -328,8 +330,8 @@ export const CashierModal: React.FC<CashierModalProps> = ({
     onUpdateBalance(newRealBalance, user.playMoneyBalance, user.bonusBalance);
     updateUserBalanceInFirebase(user.id, newRealBalance, user.playMoneyBalance, user.bonusBalance);
 
-    // Record in Admin storage
-    adminStorage.addWithdrawalRequest({
+    // Record in Admin storage & Firestore
+    const withRecord = {
       id: `wth_${Date.now().toString().slice(-6)}`,
       userId: user.id,
       username: user.username,
@@ -337,9 +339,11 @@ export const CashierModal: React.FC<CashierModalProps> = ({
       bankName: 'Kapital Bank / ABB / Leobank / Visa',
       amount: parsedWithdraw,
       currency: user.currency,
-      status: 'pending',
+      status: 'pending' as const,
       createdAt: Date.now(),
-    });
+    };
+    adminStorage.addWithdrawalRequest(withRecord);
+    saveWithdrawalToFirestore(withRecord);
 
     const newTx: WalletTransaction = {
       id: `tx_${Date.now().toString().slice(-6)}`,

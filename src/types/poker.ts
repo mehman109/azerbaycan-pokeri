@@ -117,6 +117,7 @@ export interface UserProfile {
   vipXp: number;
   is2FAEnabled: boolean;
   isAdmin?: boolean;
+  isBanned?: boolean;
   twoFactorSecret?: string;
   totalHandsPlayed: number;
   handsWon: number;

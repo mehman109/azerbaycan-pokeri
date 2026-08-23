@@ -22,6 +22,21 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Deposits collection
+    match /deposits/{depositId} {
+      allow read, write: if true;
+    }
+
+    // Withdrawals collection
+    match /withdrawals/{withdrawalId} {
+      allow read, write: if true;
+    }
+
+    // System Config
+    match /system_config/{configId} {
+      allow read, write: if true;
+    }
+
     // Fraud Alerts collection
     match /fraud_alerts/{alertId} {
       allow read, write: if true;

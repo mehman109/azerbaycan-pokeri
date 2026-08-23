@@ -19,20 +19,23 @@ import { CreateTableModal } from './components/CreateTableModal';
 import { HandRankingsModal } from './components/HandRankingsModal';
 import { TableSettingsModal } from './components/TableSettingsModal';
 import { SupportModal } from './components/SupportModal';
+import { AdminPanelModal } from './components/AdminPanelModal';
+import { UserSettingsModal } from './components/UserSettingsModal';
 import { adminStorage } from './utils/adminStore';
 import { generateInitialTables, createPopulatedTable, createBotPlayer } from './utils/mockData';
 import { createDeck } from './utils/pokerEngine';
 import { soundManager } from './utils/audioEngine';
 import confetti from 'canvas-confetti';
 import { motion, AnimatePresence } from 'motion/react';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, Bell, X, ExternalLink } from 'lucide-react';
 import { 
   auth, 
   syncUserProfile, 
   updateUserBalanceInFirebase, 
   getSavedLocalUser, 
   clearLocalUser, 
-  isAdminEmail 
+  isAdminEmail,
+  subscribeToRealtimeAdminData
 } from './services/firebase';
 import { GOLDEN_ACE_AVATAR } from './types/poker';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
@@ -191,9 +194,11 @@ export default function App() {
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'admin'>('signin');
   const [isCashierOpen, setIsCashierOpen] = useState(false);
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [isCreateTableOpen, setIsCreateTableOpen] = useState(false);
   const [isHandRankingsOpen, setIsHandRankingsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isUserSettingsOpen, setIsUserSettingsOpen] = useState(false);
   const [isSupportOpen, setIsSupportOpen] = useState(false);
 
   // Table Visual & Audio Settings
@@ -203,6 +208,77 @@ export default function App() {
   const [volume, setVolume] = useState<number>(0.6);
   const [autoMuck, setAutoMuck] = useState<boolean>(true);
   const [globalDepositToast, setGlobalDepositToast] = useState<string | null>(null);
+  const [adminLiveAlert, setAdminLiveAlert] = useState<{
+    id: string;
+    type: 'user' | 'deposit' | 'withdrawal';
+    title: string;
+    subtitle: string;
+  } | null>(null);
+
+  // Real-time alerts for Super Admin
+  useEffect(() => {
+    const isAdmin = user?.isAdmin || (user?.email && isAdminEmail(user.email));
+    if (!isAdmin) return;
+
+    const initialLoadTime = Date.now() - 5000;
+    const knownIds = new Set<string>();
+
+    const unsubscribe = subscribeToRealtimeAdminData({
+      onUsersChange: (users) => {
+        users.forEach((u) => {
+          if (!knownIds.has(u.id)) {
+            knownIds.add(u.id);
+            const userCreatedAt = u.createdAt ? new Date(u.createdAt).getTime() : 0;
+            if (userCreatedAt > initialLoadTime && !u.isAdmin) {
+              soundManager.playWinSound();
+              setAdminLiveAlert({
+                id: `usr_${Date.now()}`,
+                type: 'user',
+                title: '👤 YENİ OYUNÇU QEYDİYYATI!',
+                subtitle: `${u.username} (${u.email || 'Email yoxdur'}) platformada qeydiyyatdan keçdi.`
+              });
+            }
+          }
+        });
+      },
+      onDepositsChange: (deposits) => {
+        deposits.forEach((d) => {
+          if (!knownIds.has(d.id)) {
+            knownIds.add(d.id);
+            if ((d.createdAt || 0) > initialLoadTime && d.status === 'completed') {
+              soundManager.playChipSound();
+              setAdminLiveAlert({
+                id: `dep_${Date.now()}`,
+                type: 'deposit',
+                title: '💳 YENİ DEPOZİT ÇEKİ!',
+                subtitle: `${d.username || 'Oyunçu'} +$${(d.amount || 0).toFixed(2)} depozit çeki təqdim etdi.`
+              });
+            }
+          }
+        });
+      },
+      onWithdrawalsChange: (withdrawals) => {
+        withdrawals.forEach((w) => {
+          if (!knownIds.has(w.id)) {
+            knownIds.add(w.id);
+            if ((w.createdAt || 0) > initialLoadTime && w.status === 'pending') {
+              soundManager.playWinSound();
+              setAdminLiveAlert({
+                id: `wth_${Date.now()}`,
+                type: 'withdrawal',
+                title: '💸 YENİ ÇIXARIŞ TƏLƏBİ!',
+                subtitle: `${w.username || 'Oyunçu'} $${(w.amount || 0).toFixed(2)} çıxarış tələb etdi (${w.cardNumber}).`
+              });
+            }
+          }
+        });
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [user?.isAdmin, user?.email]);
 
   // Background check for pending 3-minute deposits even when CashierModal is closed
   useEffect(() => {
@@ -274,11 +350,9 @@ export default function App() {
     let newBonus = bonus !== undefined ? Number(bonus.toFixed(2)) : (user.bonusBalance ?? 0);
     let isTurnoverDone = turnoverCompleted !== undefined ? turnoverCompleted : user.bonusTurnoverCompleted;
 
-    // Check if Bonus reaches $100.00 -> Convert $100 to Real balance
-    if (newBonus >= 100 && !isTurnoverDone) {
-      newReal = Number((newReal + 100).toFixed(2));
-      newBonus = Number(Math.max(0, newBonus - 100).toFixed(2));
-      isTurnoverDone = true;
+    // Strict System Constraint: Bonus can grow from $5 up to $80 maximum, but system strictly caps and prevents reaching $100.00
+    if (newBonus > 80) {
+      newBonus = 80.00;
     }
 
     const updatedUser = {
@@ -415,6 +489,8 @@ export default function App() {
         lang={lang}
         onOpenCashier={() => setIsCashierOpen(true)}
         onOpenCreateTable={() => setIsCreateTableOpen(true)}
+        onOpenAdminPanel={() => setIsAdminPanelOpen(true)}
+        onOpenSettings={() => setIsUserSettingsOpen(true)}
         onOpenAuth={(mode) => {
           setAuthMode(mode);
           setIsAuthOpen(true);
@@ -431,6 +507,7 @@ export default function App() {
             lang={lang}
             onJoinTable={handleJoinTable}
             onOpenCreateTable={() => setIsCreateTableOpen(true)}
+            onOpenAdminPanel={() => setIsAdminPanelOpen(true)}
             onOpenAuth={() => {
               setAuthMode('signin');
               setIsAuthOpen(true);
@@ -472,6 +549,56 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Super Admin Live Alert Notification */}
+      <AnimatePresence>
+        {adminLiveAlert && (
+          <motion.div
+            initial={{ opacity: 0, y: -50, scale: 0.92 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -30, scale: 0.92 }}
+            className="fixed top-4 sm:top-6 right-3 sm:right-6 z-[130] max-w-md w-[calc(100%-24px)]"
+          >
+            <div className="p-4 bg-zinc-950 border-2 border-amber-500 rounded-2xl shadow-2xl shadow-amber-500/30 text-white flex items-start space-x-3.5 backdrop-blur-xl">
+              <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/60 flex items-center justify-center text-amber-400 shrink-0">
+                <Bell className="w-5 h-5 animate-bounce" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-black text-amber-400 tracking-wide uppercase">
+                  {adminLiveAlert.title}
+                </div>
+                <div className="text-xs text-zinc-200 mt-1 font-medium leading-relaxed">
+                  {adminLiveAlert.subtitle}
+                </div>
+                <div className="mt-2.5 flex items-center space-x-2">
+                  <button
+                    onClick={() => {
+                      setIsAdminPanelOpen(true);
+                      setAdminLiveAlert(null);
+                    }}
+                    className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-[11px] rounded-lg transition-colors flex items-center space-x-1 cursor-pointer"
+                  >
+                    <span>İdarəetmə Panelini Aç</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() => setAdminLiveAlert(null)}
+                    className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white text-[11px] font-bold rounded-lg transition-colors cursor-pointer"
+                  >
+                    Bağla
+                  </button>
+                </div>
+              </div>
+              <button
+                onClick={() => setAdminLiveAlert(null)}
+                className="text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Global Toast Notification for 3-Minute Deposit Settlement */}
       <AnimatePresence>
@@ -561,6 +688,55 @@ export default function App() {
         onClose={() => setIsSupportOpen(false)}
         lang={lang}
       />
+
+      {/* User Profile & Account Settings Modal */}
+      {user && (
+        <UserSettingsModal
+          isOpen={isUserSettingsOpen}
+          onClose={() => setIsUserSettingsOpen(false)}
+          lang={lang}
+          user={user}
+          onUpdateUser={(updatedData) => {
+            setUser({
+              ...user,
+              ...updatedData,
+            });
+            // Update in local cache as well
+            try {
+              const localSaved = localStorage.getItem('royal_poker_user');
+              if (localSaved) {
+                const parsed = JSON.parse(localSaved);
+                localStorage.setItem('royal_poker_user', JSON.stringify({ ...parsed, ...updatedData }));
+              }
+            } catch {
+              // ignore
+            }
+          }}
+          onLogout={handleLogout}
+        />
+      )}
+
+      {/* Super Admin Panel Modal */}
+      {user && (
+        <AdminPanelModal
+          isOpen={isAdminPanelOpen}
+          onClose={() => setIsAdminPanelOpen(false)}
+          lang={lang}
+          currentUser={user}
+          onRefreshUserData={() => {
+            if (user) {
+              const latest = adminStorage.getRegisteredPlayers().find(p => p.id === user.id);
+              if (latest) {
+                setUser({
+                  ...user,
+                  realBalance: latest.realBalance,
+                  bonusBalance: latest.bonusBalance,
+                });
+              }
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
