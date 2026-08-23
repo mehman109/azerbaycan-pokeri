@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // User profile documents
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+    
+    // Poker tables
+    match /tables/{tableId} {
+      allow read, write: if true;
+    }
+
+    // Transactions
+    match /transactions/{transactionId} {
+      allow read, write: if true;
+    }
+
+    // Verified Receipts collection (Anti-fraud)
+    match /verified_receipts/{receiptId} {
+      allow read, write: if true;
+    }
+
+    // Fraud Alerts collection
+    match /fraud_alerts/{alertId} {
+      allow read, write: if true;
+    }
+  }
+}

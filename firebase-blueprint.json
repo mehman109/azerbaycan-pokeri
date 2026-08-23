@@ -1,0 +1,87 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile, balance, stats and settings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "email": { "type": "string" },
+        "avatar": { "type": "string" },
+        "currency": { "type": "string" },
+        "realBalance": { "type": "number" },
+        "bonusBalance": { "type": "number" },
+        "hasClaimedSpecialBonus": { "type": "boolean" },
+        "bonusQuestStartTime": { "type": "number" },
+        "bonusTurnoverCompleted": { "type": "boolean" },
+        "playMoneyBalance": { "type": "number" },
+        "activeCurrencyMode": { "type": "string" },
+        "vipLevel": { "type": "number" },
+        "vipXp": { "type": "number" },
+        "is2FAEnabled": { "type": "boolean" },
+        "totalHandsPlayed": { "type": "number" },
+        "handsWon": { "type": "number" },
+        "biggestPotWon": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "username", "email", "realBalance", "playMoneyBalance"]
+    },
+    "PokerTable": {
+      "title": "PokerTable",
+      "description": "Live multiplayer poker table state",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "gameType": { "type": "string" },
+        "limitType": { "type": "string" },
+        "stakesTier": { "type": "string" },
+        "smallBlind": { "type": "number" },
+        "bigBlind": { "type": "number" },
+        "minBuyIn": { "type": "number" },
+        "maxBuyIn": { "type": "number" },
+        "capacity": { "type": "number" },
+        "timeBank": { "type": "number" },
+        "isPrivate": { "type": "boolean" },
+        "feltColor": { "type": "string" },
+        "stage": { "type": "string" },
+        "pot": { "type": "number" },
+        "currentTurnSeatIndex": { "type": "number" },
+        "handNumber": { "type": "number" },
+        "createdById": { "type": "string" }
+      },
+      "required": ["id", "name", "gameType", "smallBlind", "bigBlind", "capacity"]
+    },
+    "WalletTransaction": {
+      "title": "WalletTransaction",
+      "description": "User deposits, withdrawals and buy-ins",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "status": { "type": "string" },
+        "paymentMethod": { "type": "string" }
+      },
+      "required": ["id", "userId", "type", "amount", "currency", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile documents keyed by Auth UID"
+    },
+    "/tables/{tableId}": {
+      "schema": "PokerTable",
+      "description": "Poker tables"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "WalletTransaction",
+      "description": "Financial and chips transactions"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Poker Arena Pro (Texas Hold'em & PLO)",
+  "description": "Real-time Texas Hold'em and Omaha poker platform with live lobby, custom tables, cashier, sound effects, hand evaluator, and interactive table engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
