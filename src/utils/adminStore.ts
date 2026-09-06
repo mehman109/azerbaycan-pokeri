@@ -4,13 +4,16 @@ export interface AdminPendingDeposit {
   id: string;
   userId?: string;
   username?: string;
+  userEmail?: string;
   amount: number;
   currency: string;
   receiptName: string;
   receiptPreviewUrl?: string | null;
+  receiptTimestamp?: number;
   createdAt: number;
-  targetTimestamp: number;
-  status: 'processing' | 'completed' | 'rejected';
+  targetTimestamp?: number;
+  reviewedAt?: number;
+  status: 'pending' | 'processing' | 'completed' | 'rejected';
 }
 
 export interface AdminWithdrawalRequest {
@@ -192,12 +195,19 @@ export const adminStorage = {
     }
   },
 
+  addPendingDeposit: (deposit: AdminPendingDeposit) => {
+    const deposits = adminStorage.getPendingDeposits();
+    const filtered = deposits.filter((d) => d.id !== deposit.id);
+    filtered.unshift(deposit);
+    adminStorage.savePendingDeposits(filtered);
+  },
+
   approveDepositEarly: (id: string): AdminPendingDeposit | null => {
     const deposits = adminStorage.getPendingDeposits();
     let targetDeposit: AdminPendingDeposit | null = null;
     const updated = deposits.map((d) => {
-      if (d.id === id && d.status === 'processing') {
-        targetDeposit = { ...d, status: 'completed' as const, targetTimestamp: Date.now() };
+      if (d.id === id && (d.status === 'pending' || d.status === 'processing')) {
+        targetDeposit = { ...d, status: 'completed' as const, reviewedAt: Date.now(), targetTimestamp: Date.now() };
         return targetDeposit;
       }
       return d;
@@ -218,7 +228,7 @@ export const adminStorage = {
 
   rejectDeposit: (id: string) => {
     const deposits = adminStorage.getPendingDeposits();
-    const updated = deposits.map((d) => (d.id === id ? { ...d, status: 'rejected' as const } : d));
+    const updated = deposits.map((d) => (d.id === id ? { ...d, status: 'rejected' as const, reviewedAt: Date.now() } : d));
     adminStorage.savePendingDeposits(updated);
   },
 };

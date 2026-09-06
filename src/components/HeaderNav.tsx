@@ -7,7 +7,8 @@ import {
   Coins,
   LogOut,
   ShieldCheck,
-  Settings
+  Settings,
+  MessageSquare
 } from 'lucide-react';
 import { soundManager } from '../utils/audioEngine';
 
@@ -20,6 +21,7 @@ interface HeaderNavProps {
   onOpenAdminPanel?: () => void;
   onOpenSettings?: () => void;
   onOpenSupport?: () => void;
+  unreadSupportCount?: number;
   onOpenAuth: (mode: 'signin' | 'signup' | 'admin') => void;
   onLogout?: () => void;
   isMuted?: boolean;
@@ -34,6 +36,8 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
   onOpenCreateTable,
   onOpenAdminPanel,
   onOpenSettings,
+  onOpenSupport,
+  unreadSupportCount = 0,
   onOpenAuth,
   onLogout,
   onToggleCurrencyMode,
@@ -203,10 +207,31 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                 }}
                 title={lang === 'az' ? 'Hesab & Profil Ayarları (Qeydiyyat məlumatları, Şəkil yüklə, Tarixçə)' : 'Account & Profile Settings'}
                 id="header_settings_btn"
-                className="flex items-center space-x-1.5 py-1.5 px-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 hover:border-amber-400 text-zinc-300 hover:text-amber-300 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm shrink-0 whitespace-nowrap"
+                className="flex items-center space-x-1.5 py-1.5 px-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-850 border border-zinc-700 hover:border-amber-400 text-zinc-300 hover:text-amber-300 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm shrink-0 whitespace-nowrap"
               >
                 <Settings className="w-3.5 h-3.5 text-amber-400" />
                 <span>{lang === 'az' ? 'Ayarlar' : 'Settings'}</span>
+              </button>
+            )}
+
+            {/* Live Support & Contact Admin (Canlı Dəstək) Button */}
+            {onOpenSupport && (
+              <button
+                onClick={() => {
+                  soundManager.playButtonClick();
+                  onOpenSupport();
+                }}
+                title={lang === 'az' ? 'Adminlə Əlaqə & Canlı Dəstək Mesajları' : 'Contact Admin & Live Support'}
+                id="header_support_btn"
+                className="relative flex items-center space-x-1.5 py-1.5 px-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-850 border border-zinc-700 hover:border-amber-400 text-zinc-300 hover:text-amber-300 text-xs font-bold transition-all active:scale-95 cursor-pointer shadow-sm shrink-0 whitespace-nowrap"
+              >
+                <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
+                <span>{lang === 'az' ? 'Dəstək' : 'Support'}</span>
+                {unreadSupportCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-red-500 text-white text-[9.5px] font-black animate-pulse shadow">
+                    {unreadSupportCount}
+                  </span>
+                )}
               </button>
             )}
 

@@ -24,13 +24,18 @@ import {
   serverTimestamp 
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { UserProfile, CurrencyType, GOLDEN_ACE_AVATAR } from '../types/poker';
+import { UserProfile, CurrencyType, GOLDEN_ACE_AVATAR, TableRakeRecord } from '../types/poker';
 
 export const ADMIN_EMAIL = 'nmehman659@gmail.com';
+export const ADMIN_SECRET_PASSWORD = '#M557725368@';
 
 export function isAdminEmail(email?: string | null): boolean {
   if (!email) return false;
-  return email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase();
+  return email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase() || email.trim().toLowerCase() === 'admin@royalpoker.com';
+}
+
+export function checkAdminPassword(password: string): boolean {
+  return password.trim() === ADMIN_SECRET_PASSWORD;
 }
 
 // Initialize Firebase App singleton
@@ -45,12 +50,13 @@ const app = getApps().length > 0 ? getApp() : initializeApp({
 
 export const auth = getAuth(app);
 
-// Use initializeFirestore with auto-detect long polling for reliable connectivity in all browser environments
+// Initialize Firestore with reliable settings and forced long polling for maximum web sandbox stability
 export const db = (() => {
   const dbId = firebaseConfig.firestoreDatabaseId || '(default)';
   try {
     return initializeFirestore(app, {
       experimentalAutoDetectLongPolling: true,
+      experimentalForceLongPolling: true,
     }, dbId);
   } catch {
     return getFirestore(app, dbId);
@@ -426,12 +432,62 @@ export async function fetchAllDepositsFromFirestore(): Promise<any[]> {
 }
 
 // Update deposit status in Firestore
-export async function updateDepositStatusInFirestore(depositId: string, status: 'completed' | 'rejected') {
+export async function updateDepositStatusInFirestore(depositId: string, status: 'pending' | 'completed' | 'rejected') {
   try {
     const depRef = doc(db, 'deposits', depositId);
-    await updateDoc(depRef, { status, updatedAt: serverTimestamp() });
+    await updateDoc(depRef, { 
+      status, 
+      reviewedAt: Date.now(),
+      updatedAt: serverTimestamp() 
+    });
   } catch (err) {
     console.warn('Error updating deposit in Firestore:', err);
+  }
+}
+
+// Approve deposit: updates deposit record and increments player's real balance in Firestore
+export async function approveDepositInFirestore(depositId: string, userId: string, amount: number) {
+  try {
+    // 1. Update deposit status
+    const depRef = doc(db, 'deposits', depositId);
+    await updateDoc(depRef, {
+      status: 'completed',
+      reviewedAt: Date.now(),
+      updatedAt: serverTimestamp()
+    });
+
+    // 2. Fetch user and increment realBalance
+    if (userId) {
+      const userRef = doc(db, 'users', userId);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        const currentReal = Number(userData.realBalance || 0);
+        const newReal = Number((currentReal + amount).toFixed(2));
+        await updateDoc(userRef, {
+          realBalance: newReal,
+          updatedAt: serverTimestamp()
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('Error approving deposit in Firestore:', err);
+  }
+}
+
+// Subscribe to a specific user's live profile changes in Firestore
+export function subscribeToUserProfile(userId: string, onUpdate: (user: UserProfile) => void) {
+  try {
+    const userRef = doc(db, 'users', userId);
+    return onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as UserProfile;
+        onUpdate({ ...data, id: data.id || docSnap.id });
+      }
+    }, (err) => console.warn('User profile snapshot error:', err));
+  } catch (err) {
+    console.warn('Error subscribing to user profile:', err);
+    return () => {};
   }
 }
 
@@ -500,11 +556,69 @@ export async function fetchSystemConfigFromFirestore(): Promise<any | null> {
   }
 }
 
+// Save bot system configuration to Firestore
+export async function saveBotSystemConfigToFirestore(cfg: any) {
+  try {
+    const cfgRef = doc(db, 'system_config', 'bot_settings');
+    await setDoc(cfgRef, { ...cfg, updatedAt: serverTimestamp() });
+    localStorage.setItem('royal_poker_bot_config', JSON.stringify(cfg));
+  } catch (err) {
+    console.warn('Error saving bot system config to Firestore:', err);
+    localStorage.setItem('royal_poker_bot_config', JSON.stringify(cfg));
+  }
+}
+
+// Fetch bot system configuration from Firestore
+export async function fetchBotSystemConfigFromFirestore(): Promise<any | null> {
+  try {
+    const cfgRef = doc(db, 'system_config', 'bot_settings');
+    const snap = await getDoc(cfgRef);
+    if (snap.exists()) {
+      return snap.data();
+    }
+  } catch (err) {
+    console.warn('Error fetching bot system config from Firestore:', err);
+  }
+  const local = localStorage.getItem('royal_poker_bot_config');
+  if (local) {
+    try { return JSON.parse(local); } catch {}
+  }
+  // Default pro configuration as requested!
+  return {
+    isBotsActive: true,
+    botDifficulty: 'pro',
+    autoJoinLeaveEnabled: true,
+    minThinkSeconds: 4,
+    maxThinkSeconds: 9,
+    targetTableOccupancy: 4,
+  };
+}
+
+// Subscribe to real-time bot settings
+export function subscribeToBotSystemConfig(callback: (config: any) => void) {
+  try {
+    const cfgRef = doc(db, 'system_config', 'bot_settings');
+    return onSnapshot(cfgRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        localStorage.setItem('royal_poker_bot_config', JSON.stringify(data));
+        callback(data);
+      }
+    }, (err) => console.warn('Bot config snapshot listener error:', err));
+  } catch (err) {
+    console.warn('Error subscribing to bot config:', err);
+    return () => {};
+  }
+}
+
 // Real-time Firestore Listeners for Admin Dashboard
 export function subscribeToRealtimeAdminData(callbacks: {
   onUsersChange?: (users: UserProfile[]) => void;
   onDepositsChange?: (deposits: any[]) => void;
   onWithdrawalsChange?: (withdrawals: any[]) => void;
+  onMessagesChange?: (messages: SupportMessage[]) => void;
+  onRakesChange?: (rakes: TableRakeRecord[]) => void;
+  onBotConfigChange?: (config: any) => void;
 }) {
   const unsubs: (() => void)[] = [];
 
@@ -552,6 +666,45 @@ export function subscribeToRealtimeAdminData(callbacks: {
       }
     }, (err) => console.warn('Withdrawals snapshot listener error:', err));
     unsubs.push(unsubWiths);
+
+    // 4. Support messages real-time listener
+    const msgRef = collection(db, 'support_messages');
+    const unsubMsgs = onSnapshot(msgRef, (snap) => {
+      const messages: SupportMessage[] = [];
+      snap.forEach((d) => {
+        const data = d.data() as SupportMessage;
+        messages.push({ ...data, id: data.id || d.id });
+      });
+      messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      if (callbacks.onMessagesChange) {
+        callbacks.onMessagesChange(messages);
+      }
+    }, (err) => console.warn('Support messages snapshot listener error:', err));
+    unsubs.push(unsubMsgs);
+
+    // 5. Table rakes (%10 masa faizləri) real-time listener
+    const rakesRef = collection(db, 'table_rakes');
+    const unsubRakes = onSnapshot(rakesRef, (snap) => {
+      const rakes: TableRakeRecord[] = [];
+      snap.forEach((d) => {
+        const data = d.data() as TableRakeRecord;
+        rakes.push({ ...data, id: data.id || d.id });
+      });
+      rakes.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      if (callbacks.onRakesChange) {
+        callbacks.onRakesChange(rakes);
+      }
+    }, (err) => console.warn('Table rakes snapshot listener error:', err));
+    unsubs.push(unsubRakes);
+
+    // 6. Bot Settings real-time listener
+    const botCfgRef = doc(db, 'system_config', 'bot_settings');
+    const unsubBotCfg = onSnapshot(botCfgRef, (snap) => {
+      if (snap.exists() && callbacks.onBotConfigChange) {
+        callbacks.onBotConfigChange(snap.data());
+      }
+    }, (err) => console.warn('Bot config snapshot listener error:', err));
+    unsubs.push(unsubBotCfg);
   } catch (err) {
     console.warn('Error subscribing to realtime admin data:', err);
   }
@@ -562,5 +715,259 @@ export function subscribeToRealtimeAdminData(callbacks: {
     });
   };
 }
+
+// Support Message Data Structure
+export interface SupportMessage {
+  id: string;
+  userId: string;
+  username: string;
+  userEmail: string;
+  userAvatar?: string;
+  sender: 'user' | 'admin';
+  text: string;
+  createdAt: number;
+  readByAdmin?: boolean;
+  readByUser?: boolean;
+}
+
+const LOCAL_SUPPORT_KEY = 'royal_poker_support_messages';
+
+// Get local cached messages
+export function getLocalSupportMessages(): SupportMessage[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_SUPPORT_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Save local cached messages
+export function saveLocalSupportMessages(messages: SupportMessage[]): void {
+  try {
+    localStorage.setItem(LOCAL_SUPPORT_KEY, JSON.stringify(messages));
+  } catch {}
+}
+
+// Send a support message (from player or admin)
+export async function sendSupportMessage(msgData: Omit<SupportMessage, 'id'>): Promise<SupportMessage> {
+  const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const message: SupportMessage = {
+    ...msgData,
+    id: msgId,
+    createdAt: msgData.createdAt || Date.now(),
+    readByAdmin: msgData.sender === 'admin' ? true : false,
+    readByUser: msgData.sender === 'user' ? true : false,
+  };
+
+  // 1. Cache locally
+  const localList = getLocalSupportMessages();
+  localList.push(message);
+  saveLocalSupportMessages(localList);
+
+  // 2. Save to Firestore
+  try {
+    const msgRef = doc(db, 'support_messages', msgId);
+    await setDoc(msgRef, {
+      ...message,
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    console.warn('Could not save support message to Firestore:', err);
+  }
+
+  return message;
+}
+
+// Subscribe to messages for a specific player
+export function subscribeToPlayerSupportMessages(userId: string, callback: (messages: SupportMessage[]) => void): () => void {
+  try {
+    const msgRef = collection(db, 'support_messages');
+    const q = query(msgRef, where('userId', '==', userId));
+    return onSnapshot(q, (snap) => {
+      const messages: SupportMessage[] = [];
+      snap.forEach((d) => {
+        const data = d.data() as SupportMessage;
+        messages.push({ ...data, id: data.id || d.id });
+      });
+      messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+      if (messages.length > 0) {
+        callback(messages);
+      } else {
+        // Fallback to local
+        const local = getLocalSupportMessages().filter(m => m.userId === userId);
+        callback(local);
+      }
+    }, (err) => {
+      console.warn('Player support messages snapshot error:', err);
+      const local = getLocalSupportMessages().filter(m => m.userId === userId);
+      callback(local);
+    });
+  } catch (err) {
+    console.warn('Error subscribing to player support messages:', err);
+    const local = getLocalSupportMessages().filter(m => m.userId === userId);
+    callback(local);
+    return () => {};
+  }
+}
+
+// Mark messages as read by Admin
+export async function markSupportMessagesReadByAdmin(userId: string): Promise<void> {
+  try {
+    const msgRef = collection(db, 'support_messages');
+    const q = query(msgRef, where('userId', '==', userId), where('readByAdmin', '==', false));
+    const snap = await getDocs(q);
+    const promises = snap.docs.map(d => updateDoc(d.ref, { readByAdmin: true }));
+    await Promise.all(promises);
+  } catch (err) {
+    console.warn('Error marking messages read by admin:', err);
+  }
+
+  // Update local
+  const local = getLocalSupportMessages().map(m => m.userId === userId ? { ...m, readByAdmin: true } : m);
+  saveLocalSupportMessages(local);
+}
+
+// Mark messages as read by Player
+export async function markSupportMessagesReadByUser(userId: string): Promise<void> {
+  try {
+    const msgRef = collection(db, 'support_messages');
+    const q = query(msgRef, where('userId', '==', userId), where('readByUser', '==', false));
+    const snap = await getDocs(q);
+    const promises = snap.docs.map(d => updateDoc(d.ref, { readByUser: true }));
+    await Promise.all(promises);
+  } catch (err) {
+    console.warn('Error marking messages read by user:', err);
+  }
+
+  // Update local
+  const local = getLocalSupportMessages().map(m => m.userId === userId ? { ...m, readByUser: true } : m);
+  saveLocalSupportMessages(local);
+}
+
+// Fetch all support messages from Firestore
+export async function fetchAllSupportMessagesFromFirestore(): Promise<SupportMessage[]> {
+  try {
+    const msgRef = collection(db, 'support_messages');
+    const snap = await getDocs(msgRef);
+    const list: SupportMessage[] = [];
+    snap.forEach((d) => {
+      const data = d.data() as SupportMessage;
+      list.push({ ...data, id: data.id || d.id });
+    });
+    return list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  } catch (err) {
+    console.warn('Error fetching all support messages from Firestore:', err);
+    return getLocalSupportMessages();
+  }
+}
+
+// ==========================================
+// 10% MASA FAİZLƏRİ (TABLE RAKES & COMMISSIONS)
+// ==========================================
+
+const LOCAL_TABLE_RAKES_KEY = 'royal_poker_table_rakes';
+
+export function getLocalTableRakes(): TableRakeRecord[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_TABLE_RAKES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalTableRakes(rakes: TableRakeRecord[]): void {
+  try {
+    localStorage.setItem(LOCAL_TABLE_RAKES_KEY, JSON.stringify(rakes));
+  } catch {}
+}
+
+// Record 10% Table Rake from a concluded hand
+export async function recordTableRake(rakeData: Omit<TableRakeRecord, 'id'>): Promise<TableRakeRecord> {
+  const rakeId = `rake_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const record: TableRakeRecord = {
+    ...rakeData,
+    id: rakeId,
+    timestamp: rakeData.timestamp || Date.now(),
+  };
+
+  // 1. Save locally
+  const currentList = getLocalTableRakes();
+  currentList.unshift(record);
+  // Keep up to 500 recent rake records
+  saveLocalTableRakes(currentList.slice(0, 500));
+
+  // 2. Save to Firestore collection 'table_rakes'
+  try {
+    const rakeDocRef = doc(db, 'table_rakes', rakeId);
+    await setDoc(rakeDocRef, {
+      ...record,
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('Could not save table rake to Firestore:', err);
+  }
+
+  return record;
+}
+
+// Fetch all table rake records from Firestore
+export async function fetchAllTableRakesFromFirestore(): Promise<TableRakeRecord[]> {
+  try {
+    const rakesRef = collection(db, 'table_rakes');
+    const snap = await getDocs(rakesRef);
+    const list: TableRakeRecord[] = [];
+    snap.forEach((d) => {
+      const data = d.data() as TableRakeRecord;
+      list.push({ ...data, id: data.id || d.id });
+    });
+    if (list.length > 0) {
+      list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      saveLocalTableRakes(list.slice(0, 500));
+      return list;
+    }
+    return getLocalTableRakes();
+  } catch (err) {
+    console.warn('Error fetching table rakes from Firestore:', err);
+    return getLocalTableRakes();
+  }
+}
+
+// Transfer accumulated table rakes to Super Admin's Real Balance
+export async function claimTableRakesToAdminBalance(adminId: string, amountToClaim: number): Promise<number> {
+  if (amountToClaim <= 0) return 0;
+
+  try {
+    const userRef = doc(db, 'users', adminId);
+    const snap = await getDoc(userRef);
+    if (snap.exists()) {
+      const currentReal = Number(snap.data().realBalance || 0);
+      const newReal = Number((currentReal + amountToClaim).toFixed(2));
+      await updateDoc(userRef, {
+        realBalance: newReal,
+        updatedAt: serverTimestamp(),
+      });
+      return newReal;
+    }
+  } catch (err) {
+    console.warn('Error claiming table rake to admin balance in Firestore:', err);
+  }
+
+  // Fallback to local admin update
+  const saved = localStorage.getItem('royal_poker_auth_user');
+  if (saved) {
+    const u = JSON.parse(saved);
+    if (u.id === adminId || u.isAdmin) {
+      u.realBalance = Number(((u.realBalance || 0) + amountToClaim).toFixed(2));
+      localStorage.setItem('royal_poker_auth_user', JSON.stringify(u));
+      return u.realBalance;
+    }
+  }
+  return amountToClaim;
+}
+
+
 
 

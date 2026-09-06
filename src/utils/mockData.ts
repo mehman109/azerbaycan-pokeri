@@ -300,50 +300,7 @@ export function createPopulatedTable(def: {
   const deck = createDeck(def.gameType);
   const players: (Player | null)[] = new Array(def.capacity).fill(null);
 
-  // If custom created, table starts completely empty for the creator to join alone
-  if (def.isCustomCreated) {
-    return {
-      id: def.id,
-      name: def.name,
-      gameType: def.gameType,
-      limitType: def.limitType,
-      stakesTier: def.stakesTier,
-      smallBlind: def.smallBlind,
-      bigBlind: def.bigBlind,
-      minBuyIn: def.bigBlind * 20,
-      maxBuyIn: def.bigBlind * 100,
-      capacity: def.capacity,
-      timeBank: 15,
-      isPrivate: Boolean(def.passcode),
-      passcode: def.passcode,
-      feltColor: def.feltColor,
-      stage: 'waiting',
-      pot: 0,
-      sidePots: [],
-      communityCards: [],
-      currentTurnSeatIndex: 0,
-      dealerSeatIndex: 0,
-      smallBlindSeatIndex: 0,
-      bigBlindSeatIndex: 1,
-      currentHighBet: 0,
-      minRaise: def.bigBlind,
-      players,
-      handNumber: 1,
-      deck,
-      handWinners: [],
-      avgPot: def.avgPot || def.bigBlind * 25,
-      handsPerHour: def.handsPerHour || 75,
-      isCustomCreated: true,
-    };
-  }
-
-  // Populate opponents (bots) leaving seat 0 open for human
-  const numBots = def.capacity === 2 ? 1 : def.capacity === 6 ? 4 : 6;
-
-  for (let i = 1; i <= numBots; i++) {
-    players[i] = createBotPlayer(i, def.id, def.bigBlind, def.gameType, deck, undefined, players);
-  }
-
+  // All tables start clean with open seats for real players (system bots removed)
   return {
     id: def.id,
     name: def.name,
@@ -364,9 +321,9 @@ export function createPopulatedTable(def: {
     sidePots: [],
     communityCards: [],
     currentTurnSeatIndex: 0,
-    dealerSeatIndex: 1,
-    smallBlindSeatIndex: 1,
-    bigBlindSeatIndex: 2,
+    dealerSeatIndex: 0,
+    smallBlindSeatIndex: 0,
+    bigBlindSeatIndex: 1,
     currentHighBet: 0,
     minRaise: def.bigBlind,
     players,
@@ -375,6 +332,6 @@ export function createPopulatedTable(def: {
     handWinners: [],
     avgPot: def.avgPot || def.bigBlind * 25,
     handsPerHour: def.handsPerHour || 75,
-    isCustomCreated: false,
+    isCustomCreated: Boolean(def.isCustomCreated),
   };
 }

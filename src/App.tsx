@@ -27,7 +27,7 @@ import { createDeck } from './utils/pokerEngine';
 import { soundManager } from './utils/audioEngine';
 import confetti from 'canvas-confetti';
 import { motion, AnimatePresence } from 'motion/react';
-import { CheckCircle2, Bell, X, ExternalLink } from 'lucide-react';
+import { CheckCircle2, Bell, X, ExternalLink, MessageSquare, Crown } from 'lucide-react';
 import { 
   auth, 
   syncUserProfile, 
@@ -35,7 +35,10 @@ import {
   getSavedLocalUser, 
   clearLocalUser, 
   isAdminEmail,
-  subscribeToRealtimeAdminData
+  subscribeToRealtimeAdminData,
+  subscribeToUserProfile,
+  subscribeToPlayerSupportMessages,
+  SupportMessage
 } from './services/firebase';
 import { GOLDEN_ACE_AVATAR } from './types/poker';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
@@ -110,86 +113,6 @@ export default function App() {
   const [activeTable, setActiveTable] = useState<PokerTableState | null>(null);
   const [currentView, setCurrentView] = useState<'lobby' | 'table'>('lobby');
 
-  // Dynamic Lobby Activity & Shifting Engine (every 2 to 11 seconds):
-  // Updates real player counts, adds/removes bots dynamically, and re-orders/shifts tables smoothly
-  React.useEffect(() => {
-    let timeoutId: NodeJS.Timeout;
-
-    const scheduleNextShift = () => {
-      // Random interval between 2000ms (2s) and 11000ms (11s)
-      const nextDelay = 2000 + Math.floor(Math.random() * 9000);
-
-      timeoutId = setTimeout(() => {
-        setTables((prevTables) => {
-          if (prevTables.length === 0) return prevTables;
-
-          // Pick 1 or 2 random tables to update
-          const updated = prevTables.map((tbl) => {
-            if (Math.random() > 0.45) return tbl; // 55% chance this table updates
-
-            const players = [...tbl.players];
-            const emptyIndices: number[] = [];
-            const occupiedBotIndices: number[] = [];
-
-            players.forEach((p, idx) => {
-              if (idx === 0 && p?.isHuman) return; // preserve human seat if present
-              if (p === null) {
-                emptyIndices.push(idx);
-              } else if (!p.isHuman) {
-                occupiedBotIndices.push(idx);
-              }
-            });
-
-            // Random action: Bot joins an empty seat (65% chance) or leaves (35% chance)
-            const shouldAdd = Math.random() < 0.65 || occupiedBotIndices.length <= 1;
-
-            if (shouldAdd && emptyIndices.length > 0) {
-              const targetSeat = emptyIndices[Math.floor(Math.random() * emptyIndices.length)];
-              players[targetSeat] = createBotPlayer(targetSeat, tbl.id, tbl.bigBlind, tbl.gameType, undefined, undefined, players);
-            } else if (!shouldAdd && occupiedBotIndices.length > 1) {
-              const targetSeat = occupiedBotIndices[Math.floor(Math.random() * occupiedBotIndices.length)];
-              players[targetSeat] = null;
-            }
-
-            const activeCount = players.filter((p) => p !== null).length;
-            const dynamicAvgPot = Math.max(tbl.bigBlind * 10, tbl.bigBlind * (15 + activeCount * 8));
-
-            return {
-              ...tbl,
-              players,
-              avgPot: dynamicAvgPot,
-            };
-          });
-
-          // Dynamic Shifting: Prioritize 6-Max tables and active player density
-          const sorted = [...updated].sort((a, b) => {
-            // 1. Prioritize 6-Max tables at the top
-            const isA6Max = a.capacity === 6 ? 1 : 0;
-            const isB6Max = b.capacity === 6 ? 1 : 0;
-            if (isB6Max !== isA6Max) {
-              return isB6Max - isA6Max;
-            }
-
-            // 2. Sort by player count and activity
-            const countA = a.players.filter((p) => p !== null).length;
-            const countB = b.players.filter((p) => p !== null).length;
-            if (countB !== countA) {
-              return countB - countA;
-            }
-            return Math.random() - 0.5;
-          });
-
-          return sorted;
-        });
-
-        scheduleNextShift();
-      }, nextDelay);
-    };
-
-    scheduleNextShift();
-    return () => clearTimeout(timeoutId);
-  }, []);
-
   // Modals
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'admin'>('signin');
@@ -208,9 +131,11 @@ export default function App() {
   const [volume, setVolume] = useState<number>(0.6);
   const [autoMuck, setAutoMuck] = useState<boolean>(true);
   const [globalDepositToast, setGlobalDepositToast] = useState<string | null>(null);
+  const [playerAdminMessageToast, setPlayerAdminMessageToast] = useState<SupportMessage | null>(null);
+  const [unreadSupportCount, setUnreadSupportCount] = useState<number>(0);
   const [adminLiveAlert, setAdminLiveAlert] = useState<{
     id: string;
-    type: 'user' | 'deposit' | 'withdrawal';
+    type: 'user' | 'deposit' | 'withdrawal' | 'message';
     title: string;
     subtitle: string;
   } | null>(null);
@@ -245,13 +170,13 @@ export default function App() {
         deposits.forEach((d) => {
           if (!knownIds.has(d.id)) {
             knownIds.add(d.id);
-            if ((d.createdAt || 0) > initialLoadTime && d.status === 'completed') {
+            if ((d.createdAt || 0) > initialLoadTime && (d.status === 'pending' || d.status === 'processing' || d.status === 'completed')) {
               soundManager.playChipSound();
               setAdminLiveAlert({
                 id: `dep_${Date.now()}`,
                 type: 'deposit',
-                title: '💳 YENİ DEPOZİT ÇEKİ!',
-                subtitle: `${d.username || 'Oyunçu'} +$${(d.amount || 0).toFixed(2)} depozit çeki təqdim etdi.`
+                title: '💳 YENİ DEPOZİT ÇEKİ GƏLDİ!',
+                subtitle: `${d.username || 'Oyunçu'} +$${(d.amount || 0).toFixed(2)} depozit çeki təqdim etdi. İncələmək üçün toxunun!`
               });
             }
           }
@@ -272,6 +197,22 @@ export default function App() {
             }
           }
         });
+      },
+      onMessagesChange: (messages) => {
+        messages.forEach((m) => {
+          if (!knownIds.has(m.id)) {
+            knownIds.add(m.id);
+            if ((m.createdAt || 0) > initialLoadTime && m.sender === 'user' && !m.readByAdmin) {
+              soundManager.playChipSound();
+              setAdminLiveAlert({
+                id: `msg_${Date.now()}`,
+                type: 'message',
+                title: '💬 OYUNÇUDAN YENİ MESAJ!',
+                subtitle: `${m.username || 'Oyunçu'}: "${m.text.slice(0, 60)}${m.text.length > 60 ? '...' : ''}"`
+              });
+            }
+          }
+        });
       }
     });
 
@@ -280,52 +221,66 @@ export default function App() {
     };
   }, [user?.isAdmin, user?.email]);
 
-  // Background check for pending 3-minute deposits even when CashierModal is closed
+  // Real-time listener for incoming messages from Admin to the current logged in player
   useEffect(() => {
-    const checkPendingDeposits = () => {
-      try {
-        const saved = localStorage.getItem('royal_poker_pending_deposits');
-        if (!saved) return;
-        const deposits: Array<{
-          id: string;
-          amount: number;
-          status: string;
-          targetTimestamp: number;
-        }> = JSON.parse(saved);
+    if (!user?.id || user?.isAdmin) return;
 
-        const now = Date.now();
-        let changed = false;
+    const initialMsgTime = Date.now() - 3000;
+    const seenMsgIds = new Set<string>();
 
-        deposits.forEach((dep) => {
-          if (dep.status === 'processing' && now >= dep.targetTimestamp) {
-            dep.status = 'completed';
-            changed = true;
-            if (user) {
-              const newReal = Number((user.realBalance + dep.amount).toFixed(2));
-              handleUpdateBalance(newReal, user.playMoneyBalance, user.bonusBalance);
-              soundManager.playWinSound();
-              confetti({ particleCount: 90, spread: 85, origin: { y: 0.4 } });
-              setGlobalDepositToast(
-                lang === 'az'
-                  ? `🎉 Təbriklər! $${dep.amount.toFixed(2)} depozitiniz təsdiqləndi və Real Balansınıza əlavə edildi!`
-                  : `🎉 $${dep.amount.toFixed(2)} deposit credited to your Real Balance!`
-              );
-              setTimeout(() => setGlobalDepositToast(null), 6000);
-            }
+    const unsubscribe = subscribeToPlayerSupportMessages(user.id, (messages) => {
+      const unread = messages.filter(m => m.sender === 'admin' && !m.readByUser).length;
+      setUnreadSupportCount(unread);
+
+      messages.forEach((m) => {
+        if (!seenMsgIds.has(m.id)) {
+          seenMsgIds.add(m.id);
+          if (m.sender === 'admin' && (m.createdAt || 0) > initialMsgTime && !m.readByUser) {
+            soundManager.playChipSound();
+            setPlayerAdminMessageToast(m);
           }
-        });
-
-        if (changed) {
-          localStorage.setItem('royal_poker_pending_deposits', JSON.stringify(deposits));
         }
-      } catch {
-        // ignore
-      }
-    };
+      });
+    });
 
-    const interval = setInterval(checkPendingDeposits, 1000);
-    return () => clearInterval(interval);
-  }, [user, lang]);
+    return () => unsubscribe();
+  }, [user?.id, user?.isAdmin]);
+
+  // Real-time synchronization of player's balance when Admin approves a deposit or updates balance
+  useEffect(() => {
+    if (!user?.id || user?.isAdmin) return;
+
+    const currentId = user.id;
+    let initialBalance = user.realBalance;
+
+    const unsubscribe = subscribeToUserProfile(currentId, (liveUser) => {
+      if (liveUser && liveUser.realBalance !== undefined) {
+        if (liveUser.realBalance > initialBalance) {
+          const credited = (liveUser.realBalance - initialBalance).toFixed(2);
+          soundManager.playWinSound();
+          confetti({ particleCount: 100, spread: 85, origin: { y: 0.4 } });
+          setGlobalDepositToast(
+            lang === 'az'
+              ? `🎉 Təbriklər! Admin depozit çekinizi təsdiqlədi və +$${credited} Real Balansınıza köçürüldü!`
+              : `🎉 Congratulations! Admin approved your deposit and +$${credited} was credited to your Real Balance!`
+          );
+          setTimeout(() => setGlobalDepositToast(null), 8000);
+        }
+        initialBalance = liveUser.realBalance;
+        setUser((prev) => {
+          if (!prev || prev.id !== currentId) return prev;
+          return {
+            ...prev,
+            realBalance: liveUser.realBalance,
+            bonusBalance: liveUser.bonusBalance !== undefined ? liveUser.bonusBalance : prev.bonusBalance,
+            isBanned: liveUser.isBanned !== undefined ? liveUser.isBanned : prev.isBanned,
+          };
+        });
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user?.id, user?.isAdmin, lang]);
 
   // Switch between Real Money and Play Money modes
   const handleToggleCurrencyMode = () => {
@@ -491,6 +446,8 @@ export default function App() {
         onOpenCreateTable={() => setIsCreateTableOpen(true)}
         onOpenAdminPanel={() => setIsAdminPanelOpen(true)}
         onOpenSettings={() => setIsUserSettingsOpen(true)}
+        onOpenSupport={() => setIsSupportOpen(true)}
+        unreadSupportCount={unreadSupportCount}
         onOpenAuth={(mode) => {
           setAuthMode(mode);
           setIsAuthOpen(true);
@@ -543,12 +500,63 @@ export default function App() {
             onUpdateUserBalance={handleUpdateBalance}
             onOpenHandRankings={() => setIsHandRankingsOpen(true)}
             onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenSupport={() => setIsSupportOpen(true)}
             isFourColor={isFourColor}
             feltColor={feltColor}
             autoMuck={autoMuck}
           />
         )}
       </main>
+
+      {/* Player Incoming Admin Message Notification Banner */}
+      <AnimatePresence>
+        {playerAdminMessageToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -40, scale: 0.92 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.92 }}
+            className="fixed top-4 sm:top-5 right-3 sm:right-6 z-[130] max-w-sm w-[calc(100%-24px)]"
+          >
+            <div className="p-3.5 bg-gradient-to-r from-zinc-950 via-zinc-900 to-amber-950/80 border-2 border-amber-400 rounded-2xl shadow-2xl shadow-amber-500/25 text-white flex items-start space-x-3 backdrop-blur-xl">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-400/60 flex items-center justify-center text-amber-300 shrink-0">
+                <Crown className="w-5 h-5 animate-pulse" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-black text-amber-300 uppercase tracking-wider flex items-center space-x-1">
+                  <span>👑 ADMİNDƏN YENİ MESAJ</span>
+                </div>
+                <div className="text-xs text-zinc-200 mt-1 line-clamp-2 leading-relaxed font-medium">
+                  "{playerAdminMessageToast.text}"
+                </div>
+                <div className="mt-2.5 flex items-center space-x-2">
+                  <button
+                    onClick={() => {
+                      setIsSupportOpen(true);
+                      setPlayerAdminMessageToast(null);
+                    }}
+                    className="px-3 py-1 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-zinc-950 font-black text-[11px] rounded-lg transition-all flex items-center space-x-1 cursor-pointer shadow-md"
+                  >
+                    <MessageSquare className="w-3 h-3" />
+                    <span>Mesajı Aç & Cavabla</span>
+                  </button>
+                  <button
+                    onClick={() => setPlayerAdminMessageToast(null)}
+                    className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white text-[11px] font-bold rounded-lg transition-colors cursor-pointer"
+                  >
+                    Bağla
+                  </button>
+                </div>
+              </div>
+              <button
+                onClick={() => setPlayerAdminMessageToast(null)}
+                className="text-zinc-500 hover:text-zinc-300 p-0.5 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Super Admin Live Alert Notification */}
       <AnimatePresence>
@@ -680,6 +688,7 @@ export default function App() {
         onVolumeChange={setVolume}
         autoMuck={autoMuck}
         onToggleAutoMuck={setAutoMuck}
+        onOpenSupport={() => setIsSupportOpen(true)}
       />
 
       {/* Live Support Modal */}

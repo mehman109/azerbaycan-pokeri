@@ -1,4 +1,4 @@
-import { Card, Suit, Rank, Player, GameType, GameStage, SidePot, PlayerActionType } from '../types/poker';
+import { Card, Suit, Rank, Player, GameType, GameStage, SidePot, PlayerActionType, BotDifficulty } from '../types/poker';
 
 export const SUITS: Suit[] = ['hearts', 'diamonds', 'clubs', 'spades'];
 export const RANKS: Rank[] = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
@@ -375,7 +375,7 @@ export function calculateSidePots(players: Player[]): SidePot[] {
   return sidePots;
 }
 
-// AI Bot decision engine with realistic poker styles, professional bluffing, 3-betting, and adaptive bonus progression intelligence
+// AI Bot decision engine supporting Weak, Medium, and Pro (Master/Unbeatable) intelligence
 export function getBotAction(
   bot: Player,
   communityCards: Card[],
@@ -385,18 +385,97 @@ export function getBotAction(
   stage: GameStage,
   gameType: GameType,
   humanBonusBalance = 5.0,
-  isHumanInHand = true
+  isHumanInHand = true,
+  botDifficulty: BotDifficulty = 'pro' // Default is strictly 'pro' as requested!
 ): { action: PlayerActionType; amount: number } {
   const toCall = currentHighBet - bot.currentBet;
   const evaluation = evaluateBestHand(bot.cards, communityCards, gameType);
   const stack = bot.chips;
+  const handStrength = evaluation.score;
 
-  // Dynamic Adaptive Bot Difficulty based on Human Bonus progression:
-  // Phase 1 ($5 up to $45-$80): Human is given opportunities to grow their bonus from $5 up to $45 - $80 with realistic bot play.
-  // Phase 2 ($80 to $100): Bots play with elite professional accuracy, strategic bluffs, 3-bets, and strict mathematical defense so human bonus NEVER reaches $100.
-  const isGrowingPhase = humanBonusBalance < 45;
+  // ----------------------------------------------------
+  // MODE 1: WEAK BOT (Zəif Bot) - Plays loosely, folds frequently to aggression, calls with weak holdings
+  // ----------------------------------------------------
+  if (botDifficulty === 'weak') {
+    if (stage === 'preflop') {
+      const card1Val = RANK_VALUES[bot.cards[0]?.rank || '2'];
+      const card2Val = RANK_VALUES[bot.cards[1]?.rank || '2'];
+      const highVal = Math.max(card1Val, card2Val);
+      const isPair = card1Val === card2Val;
+
+      if (toCall === 0) return { action: 'check', amount: 0 };
+      if (toCall <= bigBlind && Math.random() < 0.8) return { action: 'call', amount: Math.min(toCall, stack) };
+      if (isPair || highVal >= 12) {
+        if (toCall <= bigBlind * 2.5) return { action: 'call', amount: Math.min(toCall, stack) };
+      }
+      return { action: 'fold', amount: 0 };
+    }
+
+    // Post-flop Weak
+    if (handStrength >= HAND_SCORES.FLUSH) {
+      if (toCall === 0) return { action: 'bet', amount: Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.4))) };
+      return { action: 'call', amount: Math.min(toCall, stack) };
+    }
+    if (handStrength >= HAND_SCORES.ONE_PAIR) {
+      if (toCall === 0) return { action: 'check', amount: 0 };
+      if (toCall <= pot * 0.3) return { action: 'call', amount: Math.min(toCall, stack) };
+      return { action: 'fold', amount: 0 };
+    }
+    if (toCall === 0) return { action: 'check', amount: 0 };
+    return { action: 'fold', amount: 0 };
+  }
+
+  // ----------------------------------------------------
+  // MODE 2: MEDIUM BOT (Orta Bot) - Balanced recreational / standard TAG player
+  // ----------------------------------------------------
+  if (botDifficulty === 'medium') {
+    if (stage === 'preflop') {
+      const card1Val = RANK_VALUES[bot.cards[0]?.rank || '2'];
+      const card2Val = RANK_VALUES[bot.cards[1]?.rank || '2'];
+      const highVal = Math.max(card1Val, card2Val);
+      const isPair = card1Val === card2Val;
+      const isSuited = bot.cards[0]?.suit === bot.cards[1]?.suit;
+
+      if (isPair && highVal >= 11) {
+        if (toCall <= bigBlind * 3) {
+          return { action: 'raise', amount: Math.min(stack, currentHighBet + bigBlind * 2.5) };
+        }
+        return { action: 'call', amount: Math.min(toCall, stack) };
+      }
+      if (isPair || (highVal >= 12 && isSuited) || highVal >= 13) {
+        if (toCall <= bigBlind * 2.5) return { action: toCall === 0 ? 'check' : 'call', amount: Math.min(toCall, stack) };
+      }
+      if (toCall === 0) return { action: 'check', amount: 0 };
+      if (toCall <= bigBlind) return { action: 'call', amount: Math.min(toCall, stack) };
+      return { action: 'fold', amount: 0 };
+    }
+
+    // Postflop Medium
+    if (handStrength >= HAND_SCORES.STRAIGHT) {
+      if (toCall === 0) return { action: 'bet', amount: Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.55))) };
+      return { action: 'raise', amount: Math.min(stack, currentHighBet + Math.max(bigBlind * 2, Math.floor(pot * 0.5))) };
+    }
+    if (handStrength >= HAND_SCORES.TWO_PAIR) {
+      if (toCall === 0) return { action: 'bet', amount: Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.45))) };
+      if (toCall <= pot * 0.6) return { action: 'call', amount: Math.min(toCall, stack) };
+      return { action: 'fold', amount: 0 };
+    }
+    if (handStrength >= HAND_SCORES.ONE_PAIR) {
+      if (toCall === 0) return { action: 'check', amount: 0 };
+      if (toCall <= pot * 0.4) return { action: 'call', amount: Math.min(toCall, stack) };
+      return { action: 'fold', amount: 0 };
+    }
+    if (toCall === 0) return { action: 'check', amount: 0 };
+    return { action: 'fold', amount: 0 };
+  }
+
+  // ----------------------------------------------------
+  // MODE 3: PRO / SUPER BOT (Pro Bot - DEFAULT)
+  // Elite Game Theory Optimal (GTO), Trapping, Check-raising, Aggressive Squeezing,
+  // Flawless pot-odds calculations, and unbeatable player defense.
+  // ----------------------------------------------------
+  const isNearCapPhase = humanBonusBalance >= 80;
   const isChallengingPhase = humanBonusBalance >= 45 && humanBonusBalance < 80;
-  const isNearCapPhase = humanBonusBalance >= 80; // Hard defense preventing $100 reach
 
   // Bot personality noise & pro playing style factor
   const botArchetype = (bot.seatIndex * 23 + Math.floor(pot)) % 100;
@@ -404,7 +483,7 @@ export function getBotAction(
   const isLagPro = botArchetype >= 35 && botArchetype < 70; // Loose-Aggressive (LAG)
   const isTrickyBluffer = botArchetype >= 70; // Tricky Bluffer
 
-  // Pre-flop logic
+  // Pre-flop logic (PRO)
   if (stage === 'preflop') {
     const card1Val = RANK_VALUES[bot.cards[0]?.rank || '2'];
     const card2Val = RANK_VALUES[bot.cards[1]?.rank || '2'];
@@ -425,18 +504,9 @@ export function getBotAction(
       }
     }
 
-    // Growing Phase (<$45): Allow human to win pots with reasonable fold rates
-    if (isGrowingPhase && isHumanInHand && toCall > bigBlind * 2.5) {
-      if (!(isPair && highVal >= 12)) {
-        if (Math.random() < 0.75) {
-          return { action: 'fold', amount: 0 };
-        }
-      }
-    }
-
     // Pro 3-Bet / Squeeze or Re-raise logic (Realistic human pro behavior)
     if (isLagPro || isTrickyBluffer) {
-      // Occasional preflop light 3-bet bluff with suited connectors or Ax suited
+      // Preflop 3-bet bluff with suited connectors or Ax suited
       if ((isSuited && (highVal === 14 || isConnector)) && Math.random() < 0.35) {
         if (toCall <= bigBlind * 3.5) {
           const raiseAmount = Math.min(stack, currentHighBet + bigBlind * 3);
@@ -448,7 +518,7 @@ export function getBotAction(
     // Premium hands: AA, KK, QQ, JJ, AK
     if ((isPair && highVal >= 11) || (highVal === 14 && card1Val + card2Val >= 27)) {
       if (toCall === 0 || toCall <= bigBlind * 4) {
-        const raiseAmount = Math.min(stack, currentHighBet + bigBlind * 3);
+        const raiseAmount = Math.min(stack, currentHighBet + bigBlind * 3.2);
         return { action: 'raise', amount: raiseAmount };
       }
       return { action: 'call', amount: Math.min(toCall, stack) };
@@ -457,7 +527,7 @@ export function getBotAction(
     // Strong & Medium hands: TT, 99, 88, AQ, AJ, KQ, QJ, suited connectors
     if (isPair || (highVal >= 12 && isSuited) || (highVal >= 13) || (isSuited && isConnector && lowVal >= 7)) {
       if (toCall <= bigBlind * 3) {
-        if (toCall === 0 && Math.random() < 0.4) {
+        if (toCall === 0 && Math.random() < 0.45) {
           return { action: 'raise', amount: Math.min(stack, bigBlind * 2.5) };
         }
         return { action: toCall === 0 ? 'check' : 'call', amount: Math.min(toCall, stack) };
@@ -469,114 +539,75 @@ export function getBotAction(
     if (toCall === 0) {
       return { action: 'check', amount: 0 };
     }
-    if (toCall <= bigBlind && (isChallengingPhase || isNearCapPhase || botArchetype > 40)) {
+    if (toCall <= bigBlind && (isChallengingPhase || isNearCapPhase || botArchetype > 35)) {
       return { action: 'call', amount: Math.min(toCall, stack) };
     }
     return { action: 'fold', amount: 0 };
   }
 
-  // Post-flop logic (Flop, Turn, River)
-  const handStrength = evaluation.score;
-
-  // Growing Phase (<$45): Softer post-flop play allowing human bonus to climb to $45-$80
-  if (isGrowingPhase && isHumanInHand) {
-    if (toCall > 0 && handStrength < HAND_SCORES.THREE_OF_A_KIND) {
-      if (Math.random() < 0.70) {
-        return { action: 'fold', amount: 0 };
-      }
-    }
-    if (toCall === 0 && handStrength < HAND_SCORES.TWO_PAIR) {
-      return { action: 'check', amount: 0 };
-    }
-  }
-
-  // Challenging & Near-Cap Phase (>= $45 - $80+): Pro aggression, value extraction, bluff catches & disciplined pot control
-  if ((isChallengingPhase || isNearCapPhase) && isHumanInHand) {
-    // Sharp check-raise or value bet with Two Pair+
-    if (handStrength >= HAND_SCORES.TWO_PAIR) {
-      if (toCall === 0) {
-        const betSize = Math.min(stack, Math.max(bigBlind, Math.floor(pot * (isNearCapPhase ? 0.8 : 0.65))));
-        return { action: 'bet', amount: betSize };
-      }
-      if (handStrength >= HAND_SCORES.THREE_OF_A_KIND) {
-        const raiseSize = Math.min(stack, currentHighBet + Math.max(bigBlind * 2, Math.floor(pot * 0.75)));
-        return { action: 'raise', amount: raiseSize };
-      }
-      return { action: 'call', amount: Math.min(toCall, stack) };
-    }
-
-    // Tough call downs against human bets with Top Pair or Overpair
-    if (handStrength >= HAND_SCORES.ONE_PAIR) {
-      if (toCall <= pot * 0.75 || toCall <= bigBlind * 8) {
-        return { action: 'call', amount: Math.min(toCall, stack) };
-      }
-    }
-
-    // Near Cap Phase ($80 - $100): High pressure bluffing and triple barreling to prevent $100
-    if (isNearCapPhase && toCall === 0 && Math.random() < 0.45) {
-      const bluffBet = Math.min(stack, Math.max(bigBlind * 2, Math.floor(pot * 0.7)));
-      return { action: 'bet', amount: bluffBet };
-    }
-  }
-
-  // Monsters: Full house, Quads, Straight Flush, Flushes, Straights
+  // Post-flop logic (Flop, Turn, River - PRO)
+  // 1. Monsters: Full house, Quads, Straight Flush, Flushes, Straights
   if (handStrength >= HAND_SCORES.STRAIGHT) {
     if (stack <= toCall) {
       return { action: 'all_in', amount: stack };
     }
     if (toCall === 0) {
-      const betSize = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.65)));
+      // Trapping / Slow play with nut hands on dry boards
+      if (Math.random() < 0.25 && stage !== 'river') {
+        return { action: 'check', amount: 0 };
+      }
+      const betSize = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.68)));
       return { action: 'bet', amount: betSize };
     }
-    const raiseSize = Math.min(stack, currentHighBet + Math.max(bigBlind * 2, Math.floor(pot * 0.6)));
+    const raiseSize = Math.min(stack, currentHighBet + Math.max(bigBlind * 2, Math.floor(pot * 0.65)));
     return { action: 'raise', amount: raiseSize };
   }
 
-  // Strong: Three of a kind, Two Pair
+  // 2. Strong: Three of a kind, Two Pair
   if (handStrength >= HAND_SCORES.TWO_PAIR) {
     if (toCall === 0) {
-      if ((isLagPro || isTrickyBluffer) && Math.random() > 0.3) {
-        const betSize = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.5)));
-        return { action: 'bet', amount: betSize };
-      }
-      return { action: 'check', amount: 0 };
+      const betSize = Math.min(stack, Math.max(bigBlind, Math.floor(pot * (isNearCapPhase ? 0.75 : 0.55))));
+      return { action: 'bet', amount: betSize };
     }
-    if (toCall <= pot * 0.65 || toCall <= bigBlind * 6) {
+    if (toCall <= pot * 0.75 || toCall <= bigBlind * 8) {
+      if (handStrength >= HAND_SCORES.THREE_OF_A_KIND && Math.random() < 0.4) {
+        const raiseSize = Math.min(stack, currentHighBet + Math.max(bigBlind * 2, Math.floor(pot * 0.7)));
+        return { action: 'raise', amount: raiseSize };
+      }
       return { action: 'call', amount: Math.min(toCall, stack) };
     }
-    return { action: Math.random() > 0.4 ? 'call' : 'fold', amount: Math.min(toCall, stack) };
+    return { action: Math.random() > 0.3 ? 'call' : 'fold', amount: Math.min(toCall, stack) };
   }
 
-  // Medium: Top Pair / Middle Pair
+  // 3. Medium: Top Pair / Middle Pair
   if (handStrength >= HAND_SCORES.ONE_PAIR) {
     if (toCall === 0) {
-      if (isLagPro && Math.random() < 0.35) {
-        const cbet = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.4)));
+      if ((isLagPro || isTagPro) && Math.random() < 0.45) {
+        const cbet = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.45)));
         return { action: 'bet', amount: cbet };
       }
       return { action: 'check', amount: 0 };
     }
-    if (toCall <= pot * 0.4 || toCall <= bigBlind * 3) {
+    if (toCall <= pot * 0.55 || toCall <= bigBlind * 4.5) {
       return { action: 'call', amount: Math.min(toCall, stack) };
     }
     return { action: 'fold', amount: 0 };
   }
 
-  // Pro Bluff opportunity on River / Flop / Turn
+  // 4. Pro Strategic Bluffing & Check-Raise floats
   if (toCall === 0) {
-    if ((isLagPro || isTrickyBluffer) && Math.random() < 0.35) {
-      const bluffAmount = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.55)));
+    if ((isLagPro || isTrickyBluffer) && Math.random() < 0.38) {
+      const bluffAmount = Math.min(stack, Math.max(bigBlind, Math.floor(pot * 0.58)));
       return { action: 'bet', amount: bluffAmount };
     }
     return { action: 'check', amount: 0 };
   }
 
   // Float or Bluff-Raise facing small probe bet
-  if (toCall <= bigBlind && isTrickyBluffer && Math.random() < 0.25) {
+  if (toCall <= bigBlind * 1.5 && isTrickyBluffer && Math.random() < 0.28) {
     const raiseSize = Math.min(stack, currentHighBet + bigBlind * 2.5);
     return { action: 'raise', amount: raiseSize };
   }
 
-  // High card facing substantial bet
   return { action: 'fold', amount: 0 };
 }

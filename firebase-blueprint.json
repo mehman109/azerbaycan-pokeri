@@ -68,6 +68,43 @@
         "paymentMethod": { "type": "string" }
       },
       "required": ["id", "userId", "type", "amount", "currency", "status"]
+    },
+    "SupportMessage": {
+      "title": "SupportMessage",
+      "description": "Real-time support chat message between player and admin",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "sender": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "readByAdmin": { "type": "boolean" },
+        "readByUser": { "type": "boolean" }
+      },
+      "required": ["id", "userId", "sender", "text", "createdAt"]
+    },
+    "TableRakeRecord": {
+      "title": "TableRakeRecord",
+      "description": "10% Table rake record collected from pot",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tableId": { "type": "string" },
+        "tableName": { "type": "string" },
+        "gameType": { "type": "string" },
+        "handNumber": { "type": "number" },
+        "totalPot": { "type": "number" },
+        "rakePercent": { "type": "number" },
+        "rakeAmount": { "type": "number" },
+        "netPotWon": { "type": "number" },
+        "winnerName": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "claimed": { "type": "boolean" }
+      },
+      "required": ["id", "tableId", "totalPot", "rakeAmount", "timestamp"]
     }
   },
   "firestore": {
@@ -79,9 +116,33 @@
       "schema": "PokerTable",
       "description": "Poker tables"
     },
+    "/private_tables/{tableId}": {
+      "schema": "PokerTable",
+      "description": "Private / Password-protected poker tables"
+    },
     "/transactions/{transactionId}": {
       "schema": "WalletTransaction",
       "description": "Financial and chips transactions"
+    },
+    "/deposits/{depositId}": {
+      "schema": "WalletTransaction",
+      "description": "Deposit requests and receipts"
+    },
+    "/withdrawals/{withdrawalId}": {
+      "schema": "WalletTransaction",
+      "description": "Withdrawal payout requests"
+    },
+    "/system_config/{configId}": {
+      "schema": "object",
+      "description": "System bank card and cashier settings"
+    },
+    "/support_messages/{messageId}": {
+      "schema": "SupportMessage",
+      "description": "Live support chat messages"
+    },
+    "/table_rakes/{rakeId}": {
+      "schema": "TableRakeRecord",
+      "description": "10% Table rake commission logs"
     }
   }
 }

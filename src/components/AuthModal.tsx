@@ -116,59 +116,67 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     // 1. ADMIN LOGIN FLOW
     if (isAdminMode) {
       const cleanEmail = email.trim().toLowerCase();
-      if (!cleanEmail || !password) {
-        setErrorMsg(lang === 'az' ? 'Zəhmət olmasa e-poçt və şifrəni daxil edin' : 'Please enter email and password');
+      const enteredPassword = password.trim();
+
+      if (!enteredPassword) {
+        soundManager.playErrorSound();
+        setErrorMsg(lang === 'az' ? 'Zəhmət olmasa admin şifrəsini daxil edin' : 'Please enter admin password');
         return;
       }
 
-      if (cleanEmail !== 'nmehman659@gmail.com') {
+      // Check admin password
+      if (enteredPassword !== '#M557725368@') {
         soundManager.playErrorSound();
         setErrorMsg(
           lang === 'az'
-            ? 'Yanlış admin məlumatları'
-            : 'Access Denied'
+            ? '❌ Admin şifrəsi yanlışdır! Zəhmət olmasa təyin edilmiş admin şifrəsini daxil edin.'
+            : '❌ Invalid admin password! Please enter the correct admin password.'
         );
         return;
       }
 
       setIsLoading(true);
       try {
-        const profile = await signInUserSeamlessly(cleanEmail, password);
-        if (profile.isAdmin || profile.username === 'ADMIN' || cleanEmail === 'nmehman659@gmail.com') {
-          profile.isAdmin = true;
-          profile.username = 'ADMIN';
-          profile.realBalance = profile.realBalance > 0 ? profile.realBalance : 7500.00;
-          profile.bonusBalance = 0.00;
-          profile.vipLevel = 10;
-          profile.avatar = GOLDEN_ACE_AVATAR;
-          localStorage.setItem('poker_user_session', JSON.stringify(profile));
+        const adminEmail = cleanEmail.includes('@') ? cleanEmail : 'nmehman659@gmail.com';
+        const adminProfile: UserProfile = {
+          id: 'usr_admin_master',
+          username: 'ADMIN',
+          email: adminEmail,
+          avatar: GOLDEN_ACE_AVATAR,
+          currency: 'USD',
+          realBalance: 7500.00,
+          bonusBalance: 0.00,
+          hasClaimedSpecialBonus: true,
+          bonusQuestStartTime: Date.now(),
+          bonusTurnoverCompleted: true,
+          playMoneyBalance: 25000,
+          activeCurrencyMode: 'real',
+          vipLevel: 10,
+          vipXp: 10000,
+          isAdmin: true,
+          is2FAEnabled: false,
+          totalHandsPlayed: 0,
+          handsWon: 0,
+          biggestPotWon: 0,
+          createdAt: new Date().toISOString()
+        };
+
+        // Sync to Firestore
+        try {
+          await syncUserProfile({ uid: adminProfile.id, email: adminEmail, displayName: 'ADMIN', photoURL: GOLDEN_ACE_AVATAR }, adminProfile);
+        } catch (dbErr) {
+          console.warn('Admin firestore sync note:', dbErr);
         }
+
+        localStorage.setItem('royal_poker_auth_user', JSON.stringify(adminProfile));
+        localStorage.setItem('poker_user_session', JSON.stringify(adminProfile));
+        
         soundManager.playWinSound();
-        onSuccessAuth(profile);
+        onSuccessAuth(adminProfile);
         onClose();
       } catch (err: any) {
         console.error('Admin Sign In error:', err);
-        if (err.message === 'auth/wrong-password' || err.code === 'auth/wrong-password') {
-          setErrorMsg(lang === 'az' ? 'Admin şifrəsi yanlışdır' : 'Invalid admin password');
-        } else {
-          // If first-time creation or credential creation
-          try {
-            const adminProfile = await registerUserSeamlessly(cleanEmail, password, 'ADMIN', 'USD');
-            adminProfile.isAdmin = true;
-            adminProfile.username = 'ADMIN';
-            adminProfile.realBalance = 7500.00;
-            adminProfile.bonusBalance = 0.00;
-            adminProfile.vipLevel = 10;
-            adminProfile.avatar = GOLDEN_ACE_AVATAR;
-            localStorage.setItem('poker_user_session', JSON.stringify(adminProfile));
-            soundManager.playWinSound();
-            onSuccessAuth(adminProfile);
-            onClose();
-          } catch (regErr: any) {
-            console.error('Admin registration fallback error:', regErr);
-            setErrorMsg(regErr.message || (lang === 'az' ? 'Admin girişi zamanı xəta baş verdi' : 'Admin sign-in error'));
-          }
-        }
+        setErrorMsg(lang === 'az' ? 'Admin girişi zamanı xəta baş verdi' : 'Admin sign-in error');
       } finally {
         setIsLoading(false);
       }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { X, Settings, Volume2, VolumeX, Eye, Check, Palette } from 'lucide-react';
+import { X, Settings, Volume2, VolumeX, Eye, Check, Palette, MessageSquare, Headphones } from 'lucide-react';
 import { translations, Language } from '../utils/translations';
 import { FeltColor } from '../types/poker';
 import { soundManager } from '../utils/audioEngine';
@@ -19,6 +19,7 @@ interface TableSettingsModalProps {
   onVolumeChange: (vol: number) => void;
   autoMuck: boolean;
   onToggleAutoMuck: (val: boolean) => void;
+  onOpenSupport?: () => void;
 }
 
 export const TableSettingsModal: React.FC<TableSettingsModalProps> = ({
@@ -35,6 +36,7 @@ export const TableSettingsModal: React.FC<TableSettingsModalProps> = ({
   onVolumeChange,
   autoMuck,
   onToggleAutoMuck,
+  onOpenSupport,
 }) => {
   const t = translations[lang];
 
@@ -210,6 +212,24 @@ export const TableSettingsModal: React.FC<TableSettingsModalProps> = ({
               />
             </button>
           </div>
+
+          {/* Adminlə Canlı Əlaqə / Dəstək Düyməsi */}
+          {onOpenSupport && (
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  soundManager.playButtonClick();
+                  onClose();
+                  onOpenSupport();
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-yellow-500/20 to-amber-500/20 hover:from-amber-500 hover:to-yellow-400 text-amber-300 hover:text-zinc-950 border border-amber-500/40 font-black text-xs transition-all shadow-md flex items-center justify-center space-x-2 cursor-pointer group"
+              >
+                <MessageSquare className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                <span>{lang === 'az' ? '💬 Adminlə Əlaqə Saxla (Mesaj Qutusu)' : '💬 Contact Admin (Live Chat)'}</span>
+              </button>
+            </div>
+          )}
         </div>
       </motion.div>
     </div>

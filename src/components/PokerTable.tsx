@@ -10,7 +10,8 @@ import {
   FeltColor, 
   HandHistoryRecord,
   ChatMessage,
-  FloatingEmoji
+  FloatingEmoji,
+  BotSystemConfig
 } from '../types/poker';
 import { translations, Language } from '../utils/translations';
 import { PlayingCard } from './PlayingCard';
@@ -25,6 +26,7 @@ import {
 import { createBotPlayer } from '../utils/mockData';
 import { soundManager } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
+import { recordTableRake, subscribeToBotSystemConfig, fetchBotSystemConfigFromFirestore } from '../services/firebase';
 import { 
   LogOut, 
   PlusCircle, 
@@ -40,7 +42,9 @@ import {
   ChevronRight,
   Shield,
   PlayCircle,
-  Gift
+  Gift,
+  MessageSquare,
+  Percent
 } from 'lucide-react';
 
 interface PokerTableProps {
@@ -52,6 +56,7 @@ interface PokerTableProps {
   onUpdateUserBalance: (real: number, play: number, bonus?: number, claimedSpecialBonus?: boolean) => void;
   onOpenHandRankings: () => void;
   onOpenSettings: () => void;
+  onOpenSupport?: () => void;
   isFourColor: boolean;
   feltColor: FeltColor;
   autoMuck: boolean;
@@ -66,6 +71,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
   onUpdateUserBalance,
   onOpenHandRankings,
   onOpenSettings,
+  onOpenSupport,
   isFourColor,
   feltColor,
   autoMuck,
@@ -90,7 +96,13 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     },
   ]);
   const [floatingEmojis, setFloatingEmojis] = useState<FloatingEmoji[]>([]);
-  const [winnerBanner, setWinnerBanner] = useState<{ name: string; amount: number; handName: string } | null>(null);
+  const [winnerBanner, setWinnerBanner] = useState<{ 
+    name: string; 
+    amount: number; 
+    totalPot?: number; 
+    rakeAmount?: number; 
+    handName: string 
+  } | null>(null);
 
   // User Balances (Real + Bonus Support)
   const userRealBalance = currentUser.realBalance || 0;
@@ -152,166 +164,89 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
   const [handsPlayedCount, setHandsPlayedCount] = useState<number>(0);
 
-  // Automated Background Bot Flow Engine:
-  // Masaya daxil olduqda sistem arxa planda 5-12 saniyə ərzində ilk botu masaya daxil edir.
-  // Sonra hər 5-45 saniyə arasında canlı insan kimi botlar masaya daxil olur və ya masadan çıxış edir.
+  // Real-time Bot Settings from Admin Panel / Firestore (Pro mode active by default)
+  const [botConfig, setBotConfig] = useState<BotSystemConfig>({
+    isBotsActive: true,
+    botDifficulty: 'pro',
+    autoJoinLeaveEnabled: true,
+    minThinkSeconds: 4,
+    maxThinkSeconds: 9,
+    targetTableOccupancy: 4,
+  });
+
   useEffect(() => {
-    let initialBotTimeout: NodeJS.Timeout | null = null;
-    let backgroundLoopTimeout: NodeJS.Timeout | null = null;
-    let isCancelled = false;
+    // Initial fetch
+    fetchBotSystemConfigFromFirestore().then((cfg) => {
+      if (cfg) setBotConfig(cfg);
+    });
 
-    // 1. Initial bot arrival (5 to 12 seconds)
-    const initialDelay = 5000 + Math.floor(Math.random() * 7000);
-    initialBotTimeout = setTimeout(() => {
-      if (isCancelled) return;
-      setTable((prevTable) => {
-        const emptySeatIndices: number[] = [];
-        prevTable.players.forEach((p, idx) => {
-          if (p === null) emptySeatIndices.push(idx);
-        });
-
-        if (emptySeatIndices.length === 0) return prevTable;
-
-        const targetSeat = emptySeatIndices[Math.floor(Math.random() * emptySeatIndices.length)];
-        const newBot = createBotPlayer(
-          targetSeat,
-          prevTable.id,
-          prevTable.bigBlind,
-          prevTable.gameType,
-          undefined,
-          undefined,
-          prevTable.players
-        );
-
-        const updatedPlayers = [...prevTable.players];
-        updatedPlayers[targetSeat] = newBot;
-
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `sys_bot_init_${Date.now()}`,
-            senderName: 'System',
-            senderAvatar: '',
-            text:
-              lang === 'az'
-                ? `👤 ${newBot.name} masaya daxil oldu ($${newBot.chips.toLocaleString()})`
-                : `👤 ${newBot.name} joined the table ($${newBot.chips.toLocaleString()})`,
-            timestamp: Date.now(),
-            isSystem: true,
-          },
-        ]);
-
-        return {
-          ...prevTable,
-          players: updatedPlayers,
-        };
-      });
-    }, initialDelay);
-
-    // 2. Continuous dynamic background bot activity (5 to 45 seconds interval)
-    const scheduleNextBotActivity = () => {
-      const nextDelay = 5000 + Math.floor(Math.random() * 40000); // 5 to 45 seconds
-
-      backgroundLoopTimeout = setTimeout(() => {
-        if (isCancelled) return;
-
-        setTable((prevTable) => {
-          const emptySeatIndices: number[] = [];
-          const botSeatIndices: number[] = [];
-
-          prevTable.players.forEach((p, idx) => {
-            if (p === null) {
-              emptySeatIndices.push(idx);
-            } else if (!p.isHuman) {
-              botSeatIndices.push(idx);
-            }
-          });
-
-          const activeCount = prevTable.players.filter((p) => p !== null && !p.isSittingOut).length;
-
-          // Decision: Bot joins (75% or when < 2 players) or bot leaves (25% when 2+ bots and not mid-action)
-          const shouldAdd = activeCount < 2 || (Math.random() < 0.75 && emptySeatIndices.length > 0) || botSeatIndices.length <= 1;
-
-          if (shouldAdd && emptySeatIndices.length > 0) {
-            const targetSeat = emptySeatIndices[Math.floor(Math.random() * emptySeatIndices.length)];
-            const newBot = createBotPlayer(
-              targetSeat,
-              prevTable.id,
-              prevTable.bigBlind,
-              prevTable.gameType,
-              undefined,
-              undefined,
-              prevTable.players
-            );
-
-            const updatedPlayers = [...prevTable.players];
-            updatedPlayers[targetSeat] = newBot;
-
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `sys_bot_join_${Date.now()}`,
-                senderName: 'System',
-                senderAvatar: '',
-                text:
-                  lang === 'az'
-                    ? `👤 ${newBot.name} masaya daxil oldu ($${newBot.chips.toLocaleString()})`
-                    : `👤 ${newBot.name} joined the table ($${newBot.chips.toLocaleString()})`,
-                timestamp: Date.now(),
-                isSystem: true,
-              },
-            ]);
-
+    // Real-time listener so whenever admin changes difficulty or timer, all tables update live
+    const unsubscribe = subscribeToBotSystemConfig((cfg) => {
+      if (cfg) {
+        setBotConfig(cfg);
+        // If bots were just deactivated, instantly remove all bots from the table
+        if (cfg.isBotsActive === false) {
+          setTable((prev) => {
+            const hasBots = prev.players.some((p) => p && !p.isHuman);
+            if (!hasBots) return prev;
             return {
-              ...prevTable,
-              players: updatedPlayers,
+              ...prev,
+              players: prev.players.map((p) => (p && !p.isHuman ? null : p)),
+              stage: prev.players.filter((p) => p && p.isHuman).length < 2 ? 'waiting' : prev.stage,
             };
-          } else if (!shouldAdd && botSeatIndices.length > 1 && (prevTable.stage === 'waiting' || prevTable.stage === 'hand_ended')) {
-            // A bot leaves the table naturally between hands
-            const leavingSeat = botSeatIndices[Math.floor(Math.random() * botSeatIndices.length)];
-            const leavingBot = prevTable.players[leavingSeat];
-
-            if (leavingBot) {
-              const updatedPlayers = [...prevTable.players];
-              updatedPlayers[leavingSeat] = null;
-
-              setChatMessages((prev) => [
-                ...prev,
-                {
-                  id: `sys_bot_leave_${Date.now()}`,
-                  senderName: 'System',
-                  senderAvatar: '',
-                  text:
-                    lang === 'az'
-                      ? `🚪 ${leavingBot.name} masadan ayrıldı ($${leavingBot.chips.toLocaleString()})`
-                      : `🚪 ${leavingBot.name} left the table ($${leavingBot.chips.toLocaleString()})`,
-                  timestamp: Date.now(),
-                  isSystem: true,
-                },
-              ]);
-
-              return {
-                ...prevTable,
-                players: updatedPlayers,
-              };
-            }
-          }
-
-          return prevTable;
-        });
-
-        scheduleNextBotActivity();
-      }, nextDelay);
-    };
-
-    scheduleNextBotActivity();
+          });
+        }
+      }
+    });
 
     return () => {
-      isCancelled = true;
-      if (initialBotTimeout) clearTimeout(initialBotTimeout);
-      if (backgroundLoopTimeout) clearTimeout(backgroundLoopTimeout);
+      unsubscribe();
     };
-  }, [lang]);
+  }, []);
+
+  // When table is waiting, human is seated, and bots are active, spawn bots to start game
+  useEffect(() => {
+    if (table.stage === 'waiting' && botConfig.isBotsActive !== false && botConfig.autoJoinLeaveEnabled) {
+      const activeCount = table.players.filter((p) => p !== null).length;
+      const targetCount = botConfig.targetTableOccupancy || 4;
+
+      if (activeCount < targetCount) {
+        const spawnTimer = setTimeout(() => {
+          setTable((prev) => {
+            const hasHuman = prev.players.some((p) => p && p.isHuman);
+            if (!hasHuman && prev.isCustomCreated) return prev;
+
+            const updated = [...prev.players];
+            let currentSeats = updated.filter((p) => p !== null).length;
+            const target = botConfig.targetTableOccupancy || 4;
+
+            for (let i = 0; i < updated.length && currentSeats < target; i++) {
+              if (!updated[i]) {
+                const newBot = createBotPlayer(
+                  i,
+                  prev.id,
+                  prev.bigBlind,
+                  prev.gameType,
+                  undefined,
+                  undefined,
+                  updated
+                );
+                updated[i] = newBot;
+                currentSeats++;
+              }
+            }
+
+            return {
+              ...prev,
+              players: updated,
+            };
+          });
+        }, 1200);
+
+        return () => clearTimeout(spawnTimer);
+      }
+    }
+  }, [table.stage, table.players, botConfig.isBotsActive, botConfig.autoJoinLeaveEnabled, botConfig.targetTableOccupancy]);
 
   // When table is waiting and 2+ active players are present, automatically start the hand!
   useEffect(() => {
@@ -326,7 +261,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     }
   }, [table.stage, table.players]);
 
-  // Handle Bot Turn automatically
+  // Handle Bot Turn automatically with human-like 4 to 9 second thinking time & selected Bot Difficulty
   useEffect(() => {
     if (table.stage === 'showdown' || table.stage === 'hand_ended' || table.stage === 'waiting') return;
 
@@ -334,8 +269,11 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     if (currentSeat && !currentSeat.isHuman && !currentSeat.isFolded && !currentSeat.isAllIn) {
       if (botTurnTimeoutRef.current) clearTimeout(botTurnTimeoutRef.current);
 
-      // Bot thinking / decision delay: 3 to 8 seconds
-      const delay = 3000 + Math.random() * 5000;
+      // Human-like thinking time delay: 4 to 9 seconds (minThinkSeconds to maxThinkSeconds)
+      const minDelay = (botConfig.minThinkSeconds || 4) * 1000;
+      const maxDelay = (botConfig.maxThinkSeconds || 9) * 1000;
+      const delay = minDelay + Math.random() * (maxDelay - minDelay);
+
       botTurnTimeoutRef.current = setTimeout(() => {
         const currentHuman = table.players.find((p) => p && p.isHuman);
         const humanBonusProgression = (currentUser.bonusBalance ?? 0) + (isPlayerUsingBonus && currentHuman ? currentHuman.chips : 0);
@@ -350,7 +288,8 @@ export const PokerTable: React.FC<PokerTableProps> = ({
           table.stage,
           table.gameType,
           humanBonusProgression,
-          isHumanActiveInHand
+          isHumanActiveInHand,
+          botConfig.botDifficulty || 'pro' // Uses current Admin Panel setting (pro by default)
         );
 
         if (botAction.action === 'fold') soundManager.playFoldSound();
@@ -365,7 +304,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     return () => {
       if (botTurnTimeoutRef.current) clearTimeout(botTurnTimeoutRef.current);
     };
-  }, [table.currentTurnSeatIndex, table.stage]);
+  }, [table.currentTurnSeatIndex, table.stage, botConfig]);
 
   // Execute Action for a Player
   const executePlayerAction = (seatIndex: number, action: PlayerActionType, amount: number) => {
@@ -593,14 +532,20 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     const bestScore = activeContenders[0]?.handRankScore || 0;
     const winners = activeContenders.filter((c) => c.handRankScore === bestScore);
 
-    const winShare = Math.floor(finalState.pot / (winners.length || 1));
+    // Calculate 10% Masa Faizi (Table Rake) & Net Pot
+    const totalPot = finalState.pot;
+    const rakePercent = 10;
+    const rakeAmount = Number((totalPot * 0.10).toFixed(2));
+    const netPot = Number(Math.max(0, totalPot - rakeAmount).toFixed(2));
+    const winShare = Number((netPot / (winners.length || 1)).toFixed(2));
+
     const updatedPlayers = finalState.players.map((p) => {
       if (!p) return null;
       const isWin = winners.some((w) => w.id === p.id);
       const evaluated = activeContenders.find((c) => c.id === p.id);
       return {
         ...p,
-        chips: isWin ? p.chips + winShare : p.chips,
+        chips: isWin ? Number((p.chips + winShare).toFixed(2)) : p.chips,
         isWinner: isWin,
         winAmount: isWin ? winShare : 0,
         handRankName: evaluated?.handRankName,
@@ -614,9 +559,28 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
     setWinnerBanner({
       name: winnerNames,
-      amount: finalState.pot,
+      amount: netPot,
+      totalPot,
+      rakeAmount,
       handName: winnerHandName,
     });
+
+    // Record 10% Table Rake to Firestore & Admin Panel System
+    if (rakeAmount > 0) {
+      recordTableRake({
+        tableId: finalState.id,
+        tableName: finalState.name,
+        gameType: finalState.gameType,
+        handNumber: finalState.handNumber,
+        totalPot,
+        rakePercent: 10,
+        rakeAmount,
+        netPotWon: netPot,
+        winnerName: winnerNames,
+        winnerAvatar: winners[0]?.avatar,
+        timestamp: Date.now(),
+      });
+    }
 
     if (winners.some((w) => w.isHuman)) {
       confetti({ particleCount: 80, spread: 90, origin: { y: 0.5 } });
@@ -630,7 +594,9 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       tableName: finalState.name,
       gameType: finalState.gameType,
       blinds: `$${finalState.smallBlind}/$${finalState.bigBlind}`,
-      pot: finalState.pot,
+      pot: totalPot,
+      rake: rakeAmount,
+      netPot: netPot,
       communityCards: finalState.communityCards,
       winners: winners.map((w) => ({
         name: w.name,
@@ -674,14 +640,21 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     finalPot: number
   ): PokerTableState => {
     soundManager.playWinSound();
+
+    // Calculate 10% Table Rake & Net Pot
+    const totalPot = finalPot;
+    const rakePercent = 10;
+    const rakeAmount = Number((totalPot * 0.10).toFixed(2));
+    const netPot = Number(Math.max(0, totalPot - rakeAmount).toFixed(2));
+
     const updatedPlayers = players.map((p) => {
       if (!p) return null;
       if (p.id === winner.id) {
         return {
           ...p,
-          chips: p.chips + finalPot,
+          chips: Number((p.chips + netPot).toFixed(2)),
           isWinner: true,
-          winAmount: finalPot,
+          winAmount: netPot,
         };
       }
       return p;
@@ -689,9 +662,28 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
     setWinnerBanner({
       name: winner.name,
-      amount: finalPot,
+      amount: netPot,
+      totalPot,
+      rakeAmount,
       handName: lang === 'az' ? 'Rəqiblər fold etdi' : 'Everyone folded',
     });
+
+    // Record 10% Table Rake to Firestore & Admin Panel System
+    if (rakeAmount > 0) {
+      recordTableRake({
+        tableId: prevTable.id,
+        tableName: prevTable.name,
+        gameType: prevTable.gameType,
+        handNumber: prevTable.handNumber,
+        totalPot,
+        rakePercent: 10,
+        rakeAmount,
+        netPotWon: netPot,
+        winnerName: winner.name,
+        winnerAvatar: winner.avatar,
+        timestamp: Date.now(),
+      });
+    }
 
     if (winner.isHuman) {
       confetti({ particleCount: 50, spread: 70, origin: { y: 0.5 } });
@@ -712,7 +704,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       handWinners: [
         {
           playerId: winner.id,
-          amount: finalPot,
+          amount: netPot,
           handName: lang === 'az' ? 'Bütün oyunçular çəkildi' : 'All folded',
           winningCards: [],
         },
@@ -758,6 +750,12 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         }
 
         // Bot Checks:
+        // 0. Master Deactivation Check: If bots are deactivated globally by admin, remove all bots immediately!
+        if (botConfig.isBotsActive === false) {
+          candidatePlayers.push(null);
+          continue;
+        }
+
         // A. Session Duration (2 mins to 120 mins)
         const botJoinedAt = p.joinedAt || Date.now();
         const durationMinutes = p.sessionDurationMinutes || 15;
@@ -808,6 +806,34 @@ export const PokerTable: React.FC<PokerTableProps> = ({
           }
         } else {
           candidatePlayers.push(p);
+        }
+      }
+
+      // Dynamically auto-fill empty seats with new AI Bots if occupancy drops below target AND bots are active
+      if (botConfig.isBotsActive !== false && botConfig.autoJoinLeaveEnabled) {
+        const targetCount = botConfig.targetTableOccupancy || 4;
+        let currentOccupancy = candidatePlayers.filter((p) => p !== null).length;
+        if (currentOccupancy < targetCount) {
+          for (let sIdx = 0; sIdx < totalSeats && currentOccupancy < targetCount; sIdx++) {
+            if (!candidatePlayers[sIdx]) {
+              const newBot = createBotPlayer(
+                sIdx,
+                prevTable.id,
+                prevTable.bigBlind,
+                prevTable.gameType,
+                undefined,
+                undefined,
+                candidatePlayers
+              );
+              candidatePlayers[sIdx] = newBot;
+              currentOccupancy++;
+              messagesToAdd.push(
+                lang === 'az'
+                  ? `👋 ${newBot.name} masaya qoşuldu.`
+                  : `👋 ${newBot.name} joined the table.`
+              );
+            }
+          }
         }
       }
 
@@ -1311,6 +1337,50 @@ export const PokerTable: React.FC<PokerTableProps> = ({
             </span>
           </div>
         </div>
+
+        {/* Right Quick Tools: Settings, Support, Hand Rankings */}
+        <div className="flex items-center space-x-1.5 shrink-0">
+          {onOpenHandRankings && (
+            <button
+              onClick={() => {
+                soundManager.playButtonClick();
+                onOpenHandRankings();
+              }}
+              title={lang === 'az' ? 'Poker Kombinasiyaları & Qaydalar' : 'Hand Rankings'}
+              className="p-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-amber-300 transition-colors cursor-pointer"
+            >
+              <Award className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {onOpenSupport && (
+            <button
+              onClick={() => {
+                soundManager.playButtonClick();
+                onOpenSupport();
+              }}
+              title={lang === 'az' ? 'Adminlə Canlı Əlaqə & Dəstək' : 'Live Support'}
+              className="flex items-center space-x-1 py-1 px-2 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-amber-500/50 text-amber-400 hover:text-amber-300 text-xs font-bold transition-all shadow cursor-pointer"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{lang === 'az' ? 'Dəstək' : 'Support'}</span>
+            </button>
+          )}
+
+          {onOpenSettings && (
+            <button
+              onClick={() => {
+                soundManager.playButtonClick();
+                onOpenSettings();
+              }}
+              title={lang === 'az' ? 'Masa və Səs Ayarları' : 'Settings'}
+              className="flex items-center space-x-1 py-1 px-2 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold transition-colors shadow cursor-pointer"
+            >
+              <Settings className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{lang === 'az' ? 'Ayarlar' : 'Settings'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Main Oval Poker Table Canvas */}
@@ -1388,15 +1458,37 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                   })}
                 </div>
 
-                {/* Game Stage & Street indicator */}
-                <div className="text-[9.5px] font-semibold text-white/60 tracking-wider uppercase bg-black/30 px-2.5 py-0.5 rounded-full">
-                  {table.stage === 'preflop' && 'Pre-Flop'}
-                  {table.stage === 'flop' && 'Flop'}
-                  {table.stage === 'turn' && 'Turn'}
-                  {table.stage === 'river' && 'River'}
-                  {table.stage === 'showdown' && 'Showdown'}
-                  {table.stage === 'hand_ended' && (lang === 'az' ? 'Əl bitdi' : 'Hand Ended')}
-                </div>
+                {/* Game Stage & Street indicator or Winner Banner */}
+                {winnerBanner ? (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="flex flex-col items-center bg-zinc-950/95 border border-amber-400/80 px-3 py-1 rounded-xl shadow-xl backdrop-blur-md"
+                  >
+                    <div className="flex items-center space-x-1.5">
+                      <Crown className="w-3.5 h-3.5 text-yellow-400 animate-bounce" />
+                      <span className="text-[11px] font-black text-amber-300">{winnerBanner.name}</span>
+                      <span className="text-[11px] font-black text-emerald-400 font-mono">+${winnerBanner.amount.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center space-x-1 text-[8.5px] text-zinc-300">
+                      <span>{winnerBanner.handName}</span>
+                      {winnerBanner.rakeAmount !== undefined && winnerBanner.rakeAmount > 0 && (
+                        <span className="text-amber-400 font-bold bg-amber-950/90 px-1 py-0.2 rounded border border-amber-500/40">
+                          Masa Faizi (10%): -${winnerBanner.rakeAmount.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                  </motion.div>
+                ) : (
+                  <div className="text-[9.5px] font-semibold text-white/60 tracking-wider uppercase bg-black/30 px-2.5 py-0.5 rounded-full">
+                    {table.stage === 'preflop' && 'Pre-Flop'}
+                    {table.stage === 'flop' && 'Flop'}
+                    {table.stage === 'turn' && 'Turn'}
+                    {table.stage === 'river' && 'River'}
+                    {table.stage === 'showdown' && 'Showdown'}
+                    {table.stage === 'hand_ended' && (lang === 'az' ? 'Əl bitdi' : 'Hand Ended')}
+                  </div>
+                )}
               </div>
           </div>
 

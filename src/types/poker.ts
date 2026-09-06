@@ -17,6 +17,18 @@ export type GameStage = 'waiting' | 'preflop' | 'flop' | 'turn' | 'river' | 'sho
 
 export type PlayerActionType = 'fold' | 'check' | 'call' | 'bet' | 'raise' | 'all_in' | 'sit_out' | 'none';
 
+export type BotDifficulty = 'weak' | 'medium' | 'pro';
+
+export interface BotSystemConfig {
+  isBotsActive: boolean; // Master toggle: true = active bots in tables, false = remove all bots from tables
+  botDifficulty: BotDifficulty; // 'pro' by default as requested
+  autoJoinLeaveEnabled: boolean;
+  minThinkSeconds: number; // 4s
+  maxThinkSeconds: number; // 9s
+  targetTableOccupancy: number; // e.g. 3-4 players per table
+  updatedAt?: number;
+}
+
 export type CurrencyType = 'USD' | 'EUR' | 'AZN' | 'USDT' | 'PLAY';
 
 export interface Player {
@@ -49,6 +61,7 @@ export interface Player {
   joinedAt?: number;
   sessionDurationMinutes?: number;
   willRebuyOnBust?: boolean;
+  isThinking?: boolean;
 }
 
 export interface SidePot {
@@ -145,6 +158,8 @@ export interface HandHistoryRecord {
   gameType: GameType;
   blinds: string;
   pot: number;
+  rake?: number;
+  netPot?: number;
   communityCards: Card[];
   winners: {
     name: string;
@@ -155,6 +170,21 @@ export interface HandHistoryRecord {
   }[];
   playerCards: Card[];
   playerProfit: number;
+  timestamp: number;
+}
+
+export interface TableRakeRecord {
+  id: string;
+  tableId?: string;
+  tableName: string;
+  gameType: GameType | string;
+  handNumber: number;
+  totalPot: number;
+  rakePercent: number; // 10%
+  rakeAmount: number; // 10% of pot
+  netPotWon: number;
+  winnerName: string;
+  winnerAvatar?: string;
   timestamp: number;
 }
 

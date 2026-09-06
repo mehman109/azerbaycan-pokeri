@@ -66,11 +66,17 @@ export const DepositPaymentModal: React.FC<DepositPaymentModalProps> = ({
     const file = e.target.files?.[0];
     if (file) {
       setSelectedFile(file);
-      const url = URL.createObjectURL(file);
-      setPreviewUrl(url);
       setDetectedTimestamp(file.lastModified || Date.now());
       setErrorMsg(null);
       soundManager.playButtonClick();
+
+      // Read as base64 data URL so Admin can inspect on any device
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const base64 = event.target?.result as string;
+        setPreviewUrl(base64);
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -396,7 +402,7 @@ export const DepositPaymentModal: React.FC<DepositPaymentModalProps> = ({
             ) : (
               <>
                 <Check className="w-4 h-4 stroke-[3]" />
-                <span>{lang === 'az' ? 'Ödənişi Təsdiq Et və Çeki Yoxla' : 'Confirm Payment & Verify Receipt'}</span>
+                <span>{lang === 'az' ? '💳 Ödənişi Təsdiq Et və Adminə Göndər' : 'Confirm Payment & Submit to Admin'}</span>
               </>
             )}
           </button>

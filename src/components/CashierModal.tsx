@@ -213,54 +213,64 @@ export const CashierModal: React.FC<CashierModalProps> = ({
     setIsDepositPaymentModalOpen(true);
   };
 
-  // Called when user clicks "Ödənişi etdim" inside DepositPaymentModal
+  // Called when user clicks "Ödənişi təsdiq et" inside DepositPaymentModal
   const handleCompletePaymentFromModal = (
     receiptFile: File | null, 
     previewUrl: string | null, 
     detectedDate?: number
   ) => {
     const verifiedTime = detectedDate || Date.now();
+    const depId = `dep_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-    // 1. INSTANTLY add verified deposit amount directly to user's real balance
-    const newRealBalance = user.realBalance + parsedDeposit;
-    onUpdateBalance(newRealBalance, user.playMoneyBalance, user.bonusBalance);
-    updateUserBalanceInFirebase(user.id, newRealBalance, user.playMoneyBalance, user.bonusBalance);
+    // 1. Create Pending Deposit Record with status 'pending' (sent to Admin Panel for review)
+    const depRecord = {
+      id: depId,
+      userId: user.id,
+      username: user.username,
+      userEmail: user.email || '',
+      amount: parsedDeposit,
+      currency: user.currency || 'USD',
+      receiptName: receiptFile?.name || 'bank_receipt.png',
+      receiptPreviewUrl: previewUrl,
+      receiptTimestamp: verifiedTime,
+      createdAt: Date.now(),
+      status: 'pending' as const,
+    };
 
-    soundManager.playWinSound();
-    confetti({ particleCount: 100, spread: 85, origin: { y: 0.5 } });
+    // Save to Admin store & Firestore
+    adminStorage.addPendingDeposit(depRecord);
+    saveDepositToFirestore(depRecord);
 
-    // 2. Add Completed Transaction
+    // 2. Add Pending Transaction to history
     const newTx: WalletTransaction = {
-      id: `tx_dep_${Date.now().toString().slice(-6)}`,
+      id: `tx_${depId}`,
       type: 'deposit',
       amount: parsedDeposit,
       currency: user.currency,
-      timestamp: verifiedTime,
-      status: 'completed',
-      paymentMethod: `Bank Çeki (Dəqiq Tarix & Anti-Fırıldaqçılıq Yoxlanıldı)`,
+      timestamp: Date.now(),
+      status: 'pending',
+      paymentMethod: `Bank Çeki • Admin Təsdiqi Gözlənilir ($${parsedDeposit.toFixed(2)})`,
     };
-    setTransactions([newTx, ...transactions]);
+    setTransactions((prev) => [newTx, ...prev]);
 
-    // Record in Admin storage & Firestore
-    const depRecord = {
-      id: `dep_${Date.now()}`,
-      userId: user.id,
-      username: user.username,
-      amount: parsedDeposit,
-      currency: user.currency,
-      receiptName: receiptFile?.name || 'bank_receipt.png',
-      receiptPreviewUrl: previewUrl,
-      createdAt: verifiedTime,
-      targetTimestamp: verifiedTime,
-      status: 'completed' as const,
-    };
-    const adminDeps = adminStorage.getPendingDeposits();
-    adminDeps.unshift(depRecord);
-    adminStorage.savePendingDeposits(adminDeps);
-    saveDepositToFirestore(depRecord);
+    // 3. Add to user's pending deposits list
+    setPendingDeposits((prev) => [
+      {
+        id: depId,
+        amount: parsedDeposit,
+        currency: user.currency,
+        receiptName: receiptFile?.name || 'bank_receipt.png',
+        receiptPreviewUrl: previewUrl,
+        createdAt: Date.now(),
+        targetTimestamp: Date.now() + 180000,
+        status: 'processing' as const,
+      },
+      ...prev,
+    ]);
 
     // Clear input
     setDepositInput('');
+    soundManager.playChipSound();
 
     const formattedTime = new Date(verifiedTime).toLocaleTimeString('az-AZ', {
       hour: '2-digit',
@@ -270,11 +280,11 @@ export const CashierModal: React.FC<CashierModalProps> = ({
 
     setNotification({
       text: lang === 'az'
-        ? `🎉 Depozit çekiniz Firebase tərəfindən uğurla yoxlanıldı (${formattedTime}) və +$${parsedDeposit.toFixed(2)} məbləğ Real Balansınıza DƏRHAL əlavə edildi!`
-        : `🎉 Receipt verified by Firebase (${formattedTime}) and +$${parsedDeposit.toFixed(2)} added to Real Balance INSTANTLY!`,
+        ? `✅ Depozit çekiniz qəbul edildi (${formattedTime}) və Admin Panelinə göndərildi! Admin çeki və tarixi yoxlayıb təsdiq etdikdən dərhal sonra +$${parsedDeposit.toFixed(2)} balansınıza köçürüləcək.`
+        : `✅ Receipt submitted (${formattedTime}) and sent to Admin Panel! Once the admin verifies the receipt and timestamp, +$${parsedDeposit.toFixed(2)} will be credited to your balance.`,
       type: 'success',
     });
-    setTimeout(() => setNotification(null), 6000);
+    setTimeout(() => setNotification(null), 8000);
   };
 
   // Withdraw Handler - Validates Min $15, Max $6000 & balance, and deducts the exact amount

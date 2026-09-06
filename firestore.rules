@@ -12,6 +12,11 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Private / Password-protected tables
+    match /private_tables/{tableId} {
+      allow read, write: if true;
+    }
+
     // Transactions
     match /transactions/{transactionId} {
       allow read, write: if true;
@@ -39,6 +44,16 @@ service cloud.firestore {
 
     // Fraud Alerts collection
     match /fraud_alerts/{alertId} {
+      allow read, write: if true;
+    }
+
+    // Live Support Messages collection
+    match /support_messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // 10% Table Rakes collection
+    match /table_rakes/{rakeId} {
       allow read, write: if true;
     }
   }
