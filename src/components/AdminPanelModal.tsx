@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { UserProfile, CurrencyType, TableRakeRecord, BotDifficulty, BotSystemConfig } from '../types/poker';
+import { UserProfile, CurrencyType, TableRakeRecord, BotDifficulty, BotSystemConfig, PokerTableState } from '../types/poker';
 import { Language, translations } from '../utils/translations';
 import { 
   adminStorage, 
@@ -30,6 +30,14 @@ import {
   SupportMessage,
   ADMIN_EMAIL 
 } from '../services/firebase';
+import {
+  sendBotConfigSocket,
+  emitKickPlayerSocket,
+  emitCloseTableSocket,
+  emitUpdateTableLimitsSocket,
+  emitUserBalanceChangedSocket
+} from '../services/socket';
+import { AdminTableFigure } from './AdminTableFigure';
 import { soundManager } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
 import { 
@@ -77,7 +85,25 @@ import {
   Sliders,
   Award,
   LogOut,
-  Power
+  Power,
+  Download,
+  Copy,
+  RotateCw,
+  Crown,
+  UserCheck,
+  UserX,
+  Radio,
+  Megaphone,
+  FileSpreadsheet,
+  Play,
+  Volume2,
+  RefreshCcw,
+  CheckSquare,
+  Square,
+  Trash2,
+  SlidersHorizontal,
+  UserMinus,
+  UserPlus
 } from 'lucide-react';
 
 interface AdminPanelModalProps {
@@ -86,6 +112,14 @@ interface AdminPanelModalProps {
   lang: Language;
   currentUser: UserProfile;
   onRefreshUserData?: () => void;
+  tables?: PokerTableState[];
+  onKickPlayer?: (tableId: string, playerId: string) => void;
+  onAddBotToTable?: (tableId: string) => void;
+  onRemoveBotFromTable?: (tableId: string, botId?: string) => void;
+  onCloseTable?: (tableId: string) => void;
+  onUpdateTableLimits?: (tableId: string, smallBlind: number, bigBlind: number) => void;
+  onOpenNewTableModal?: () => void;
+  onSpectateTable?: (table: PokerTableState) => void;
 }
 
 export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
@@ -94,24 +128,40 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   lang,
   currentUser,
   onRefreshUserData,
+  tables = [],
+  onKickPlayer,
+  onAddBotToTable,
+  onRemoveBotFromTable,
+  onCloseTable,
+  onUpdateTableLimits,
+  onOpenNewTableModal,
+  onSpectateTable,
 }) => {
-  const [activeTab, setActiveTab] = useState<'users' | 'deposits' | 'withdrawals' | 'messages' | 'rakes' | 'settings' | 'bots'>('users');
+  const [activeTab, setActiveTab] = useState<'tables' | 'users' | 'deposits' | 'withdrawals' | 'messages' | 'rakes' | 'settings' | 'bots'>('tables');
+  const [searchTableTerm, setSearchTableTerm] = useState<string>('');
+  const [tableFilterStakes, setTableFilterStakes] = useState<'all' | 'micro' | 'low' | 'mid' | 'high'>('all');
+  const [tableDisplayMode, setTableDisplayMode] = useState<'figure' | 'list'>('figure');
+  const [editingTableLimits, setEditingTableLimits] = useState<{ id: string; name: string; smallBlind: number; bigBlind: number } | null>(null);
+  const [newSbInput, setNewSbInput] = useState<string>('');
+  const [newBbInput, setNewBbInput] = useState<string>('');
   
-  // Bot Settings state (Pro active by default until changed, bots active toggle)
+  // Bot Settings state (Bots disabled by default until Admin enables them)
   const [botConfig, setBotConfig] = useState<BotSystemConfig>({
-    isBotsActive: true,
+    isBotsActive: false,
     botDifficulty: 'pro',
-    autoJoinLeaveEnabled: true,
+    autoJoinLeaveEnabled: false,
     minThinkSeconds: 4,
     maxThinkSeconds: 9,
     targetTableOccupancy: 4,
   });
   const [isSavingBotConfig, setIsSavingBotConfig] = useState<boolean>(false);
   
-  // Players state
+  // Players state & Proactive Filter Category
   const [players, setPlayers] = useState<UserProfile[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [userCategoryFilter, setUserCategoryFilter] = useState<'all' | 'high_rollers' | 'vip' | 'banned' | 'messages'>('all');
   const [isLoadingPlayers, setIsLoadingPlayers] = useState(false);
+  const [activeActionPlayerId, setActiveActionPlayerId] = useState<string | null>(null);
 
   // Table Rakes (%10 Masa Faizləri) state
   const [tableRakes, setTableRakes] = useState<TableRakeRecord[]>([]);
@@ -129,19 +179,25 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [editingPlayer, setEditingPlayer] = useState<UserProfile | null>(null);
   const [balanceDelta, setBalanceDelta] = useState<string>('');
   const [balanceMode, setBalanceMode] = useState<'add' | 'subtract'>('add');
-  const [balanceType, setBalanceType] = useState<'real' | 'bonus'>('real');
+  const [balanceType, setBalanceType] = useState<'real' | 'bonus' | 'play'>('real');
 
-  // Deposits & Withdrawals
+  // Deposits & Withdrawals & Proactive Bulk actions
   const [pendingDeposits, setPendingDeposits] = useState<AdminPendingDeposit[]>([]);
   const [depositFilter, setDepositFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('all');
   const [inspectingDeposit, setInspectingDeposit] = useState<AdminPendingDeposit | null>(null);
   const [receiptZoom, setReceiptZoom] = useState<number>(1);
+  const [receiptRotation, setReceiptRotation] = useState<number>(0);
   const [withdrawals, setWithdrawals] = useState<AdminWithdrawalRequest[]>([]);
   const [previewReceiptUrl, setPreviewReceiptUrl] = useState<string | null>(null);
+  const [copiedCardId, setCopiedCardId] = useState<string | null>(null);
+  const [isBulkApprovingDeposits, setIsBulkApprovingDeposits] = useState<boolean>(false);
+  const [isBulkApprovingWithdrawals, setIsBulkApprovingWithdrawals] = useState<boolean>(false);
 
-  // System Bank Settings
+  // System Bank Settings & Broadcast
   const [systemConfig, setSystemConfig] = useState<SystemConfig>(adminStorage.getConfig);
   const [configSavedToast, setConfigSavedToast] = useState(false);
+  const [broadcastInput, setBroadcastInput] = useState<string>('');
+  const [isBroadcasting, setIsBroadcasting] = useState<boolean>(false);
 
   // Toast / notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -343,18 +399,99 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Filter players
+  // Filter players by Search & Category
   const filteredPlayers = players.filter(p => {
+    // 1. Search filter
     const q = searchTerm.toLowerCase().trim();
-    if (!q) return true;
-    return (
+    const matchesSearch = !q || (
       p.username.toLowerCase().includes(q) ||
       p.email.toLowerCase().includes(q) ||
       p.id.toLowerCase().includes(q)
     );
+    if (!matchesSearch) return false;
+
+    // 2. Category filter
+    if (userCategoryFilter === 'high_rollers') {
+      return (p.realBalance || 0) >= 50;
+    }
+    if (userCategoryFilter === 'vip') {
+      return (p.vipLevel || 1) >= 2;
+    }
+    if (userCategoryFilter === 'banned') {
+      return !!p.isBanned;
+    }
+    if (userCategoryFilter === 'messages') {
+      return supportMessages.some(m => m.userId === p.id && m.sender === 'user' && !m.readByAdmin);
+    }
+    return true;
   });
 
-  // Action: Save Balance Change
+  // Proactive Action: Quick Instant Balance Adjustment (+/- directly with 1-click)
+  const handleQuickBalanceAdjust = async (player: UserProfile, delta: number, mode: 'add' | 'subtract', type: 'real' | 'bonus' = 'real') => {
+    setActiveActionPlayerId(player.id);
+    const multiplier = mode === 'add' ? 1 : -1;
+    const finalChange = delta * multiplier;
+
+    let newReal = player.realBalance || 0;
+    let newBonus = player.bonusBalance || 0;
+
+    if (type === 'real') {
+      newReal = Math.max(0, Number((newReal + finalChange).toFixed(2)));
+    } else {
+      newBonus = Math.max(0, Number((newBonus + finalChange).toFixed(2)));
+    }
+
+    const updatedProfile: UserProfile = {
+      ...player,
+      realBalance: newReal,
+      bonusBalance: newBonus,
+    };
+
+    // Update locally & remotely
+    adminStorage.updatePlayerBalance(player.id, newReal, newBonus);
+    setPlayers(prev => prev.map(p => p.id === player.id ? updatedProfile : p));
+
+    await adminUpdateUserInFirestore(player.id, {
+      realBalance: newReal,
+      bonusBalance: newBonus,
+    });
+
+    if (player.id === currentUser.id) {
+      updateUserBalanceInFirebase(currentUser.id, newReal, currentUser.playMoneyBalance, newBonus);
+      if (onRefreshUserData) onRefreshUserData();
+    }
+
+    soundManager.playChipSound();
+    showToast(`⚡ ${player.username}: ${mode === 'add' ? '+' : '-'}$${delta} ${type === 'real' ? 'Real' : 'Bonus'} balans tətbiq edildi! ($${(type === 'real' ? newReal : newBonus).toFixed(2)})`);
+    setActiveActionPlayerId(null);
+  };
+
+  // Proactive Action: Quick VIP Level change directly
+  const handleQuickVipChange = async (player: UserProfile, newVip: number) => {
+    setActiveActionPlayerId(player.id);
+    const updated = { ...player, vipLevel: newVip };
+    setPlayers(prev => prev.map(p => p.id === player.id ? updated : p));
+    adminStorage.updatePlayerBalance(player.id, player.realBalance, player.bonusBalance);
+    await adminUpdateUserInFirestore(player.id, { vipLevel: newVip });
+    soundManager.playWinSound();
+    confetti({ particleCount: 30, spread: 40 });
+    showToast(`👑 ${player.username} üçün VIP ${newVip} səviyyəsi təyin edildi!`);
+    setActiveActionPlayerId(null);
+  };
+
+  // Proactive Action: Reset Player Sit-Out / Missed Turns / Table State
+  const handleResetPlayerSitOut = async (player: UserProfile) => {
+    setActiveActionPlayerId(player.id);
+    await adminUpdateUserInFirestore(player.id, {
+      consecutiveMissedTurns: 0,
+      isSittingOut: false,
+    });
+    soundManager.playButtonClick();
+    showToast(`🔄 ${player.username} oyunçusunun fasilə (sit-out) statusu sıfırlandı və aktiv edildi!`);
+    setActiveActionPlayerId(null);
+  };
+
+  // Action: Save Balance Change in Modal
   const handleSaveBalanceAdjustment = async () => {
     if (!editingPlayer) return;
     const delta = parseFloat(balanceDelta);
@@ -368,31 +505,39 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
     let newReal = editingPlayer.realBalance || 0;
     let newBonus = editingPlayer.bonusBalance || 0;
+    let newPlay = editingPlayer.playMoneyBalance || 0;
 
     if (balanceType === 'real') {
       newReal = Math.max(0, Number((newReal + finalChange).toFixed(2)));
-    } else {
+    } else if (balanceType === 'bonus') {
       newBonus = Math.max(0, Number((newBonus + finalChange).toFixed(2)));
+    } else {
+      newPlay = Math.max(0, Math.floor(newPlay + finalChange));
     }
 
     const updatedProfile: UserProfile = {
       ...editingPlayer,
       realBalance: newReal,
       bonusBalance: newBonus,
+      playMoneyBalance: newPlay,
     };
 
     // Update in Firestore
     await adminUpdateUserInFirestore(editingPlayer.id, {
       realBalance: newReal,
       bonusBalance: newBonus,
+      playMoneyBalance: newPlay,
     });
+    updateUserBalanceInFirebase(editingPlayer.id, newReal, newPlay, newBonus);
+
+    // Broadcast instant socket event to all clients
+    emitUserBalanceChangedSocket(editingPlayer.id, newReal, newBonus, newPlay, 'admin_direct_adjustment');
 
     // Update in local admin store
     adminStorage.updatePlayerBalance(editingPlayer.id, newReal, newBonus);
 
     // If editing current admin, sync in App
     if (editingPlayer.id === currentUser.id) {
-      updateUserBalanceInFirebase(currentUser.id, newReal, currentUser.playMoneyBalance, newBonus);
       if (onRefreshUserData) onRefreshUserData();
     }
 
@@ -403,7 +548,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     soundManager.playChipSound();
     confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } });
     showToast(
-      `✅ ${editingPlayer.username} oyunçusunun ${balanceType === 'real' ? 'Real' : 'Bonus'} balansı uğurla yeniləndi! ($${(balanceType === 'real' ? newReal : newBonus).toFixed(2)})`
+      `✅ ${editingPlayer.username} oyunçusunun ${balanceType === 'real' ? 'Real' : balanceType === 'bonus' ? 'Bonus' : 'Oyun Çipi'} balansı uğurla yeniləndi!`
     );
   };
 
@@ -445,6 +590,40 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     loadAllData();
   };
 
+  // Proactive Action: Bulk Approve All Pending Deposits with 1-Click
+  const handleBulkApproveDeposits = async () => {
+    const pendingList = pendingDeposits.filter(d => d.status === 'pending' || d.status === 'processing');
+    if (pendingList.length === 0) {
+      showToast('ℹ️ Gözləyən heç bir depozit çeki yoxdur.');
+      return;
+    }
+
+    setIsBulkApprovingDeposits(true);
+    let approvedCount = 0;
+    let totalCredited = 0;
+
+    for (const dep of pendingList) {
+      adminStorage.approveDepositEarly(dep.id);
+      await updateDepositStatusInFirestore(dep.id, 'completed');
+      if (dep.userId) {
+        await approveDepositInFirestore(dep.id, dep.userId, dep.amount);
+        const player = players.find(p => p.id === dep.userId || p.username === dep.username);
+        if (player) {
+          const updatedReal = Number(((player.realBalance || 0) + dep.amount).toFixed(2));
+          adminStorage.updatePlayerBalance(player.id, updatedReal, player.bonusBalance);
+        }
+      }
+      approvedCount++;
+      totalCredited += dep.amount;
+    }
+
+    soundManager.playWinSound();
+    confetti({ particleCount: 120, spread: 90, origin: { y: 0.5 } });
+    showToast(`🚀 Bütün gözləyən ${approvedCount} depozit təsdiqləndi! Toplam +$${totalCredited.toFixed(2)} balanslara köçürüldü.`);
+    loadAllData();
+    setIsBulkApprovingDeposits(false);
+  };
+
   // Action: Reject Deposit
   const handleRejectDeposit = async (depositId: string) => {
     adminStorage.rejectDeposit(depositId);
@@ -465,6 +644,28 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     showToast(`✅ Çıxarış təsdiqləndi və ödənildi olaraq qeyd edildi.`);
   };
 
+  // Proactive Action: Bulk Approve All Pending Withdrawals
+  const handleBulkApproveWithdrawals = async () => {
+    const pendingWiths = withdrawals.filter(w => w.status === 'pending');
+    if (pendingWiths.length === 0) {
+      showToast('ℹ️ Gözləyən heç bir çıxarış tələbi yoxdur.');
+      return;
+    }
+
+    setIsBulkApprovingWithdrawals(true);
+    let count = 0;
+    for (const w of pendingWiths) {
+      adminStorage.updateWithdrawalStatus(w.id, 'approved');
+      await updateWithdrawalStatusInFirestore(w.id, 'approved');
+      count++;
+    }
+    setWithdrawals(adminStorage.getWithdrawals());
+    soundManager.playWinSound();
+    confetti({ particleCount: 60, spread: 70 });
+    showToast(`✅ Bütün ${count} gözləyən çıxarış tələbi uğurla təsdiqləndi və ödənildi!`);
+    setIsBulkApprovingWithdrawals(false);
+  };
+
   // Action: Reject Withdrawal
   const handleRejectWithdrawal = async (withdrawalId: string) => {
     adminStorage.updateWithdrawalStatus(withdrawalId, 'rejected');
@@ -472,6 +673,71 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     setWithdrawals(adminStorage.getWithdrawals());
     soundManager.playButtonClick();
     showToast(`❌ Çıxarış tələbi ləğv edildi.`);
+  };
+
+  // Proactive Action: 1-Click Copy Card Number to Clipboard
+  const handleCopyCardNumber = (cardNumber: string, id: string) => {
+    const cleanNum = cardNumber.replace(/\s+/g, '');
+    navigator.clipboard.writeText(cleanNum);
+    setCopiedCardId(id);
+    soundManager.playChipSound();
+    showToast(`📋 Kart nömrəsi kopyalandı: ${cleanNum}`);
+    setTimeout(() => setCopiedCardId(null), 2500);
+  };
+
+  // Proactive Action: Export Players to CSV spreadsheet
+  const handleExportPlayersCSV = () => {
+    const headers = ['ID', 'Username', 'Email', 'Real Balance ($)', 'Bonus Balance ($)', 'VIP Level', 'Status', 'Is Admin'];
+    const rows = players.map(p => [
+      `"${p.id}"`,
+      `"${p.username.replace(/"/g, '""')}"`,
+      `"${p.email.replace(/"/g, '""')}"`,
+      (p.realBalance || 0).toFixed(2),
+      (p.bonusBalance || 0).toFixed(2),
+      p.vipLevel || 1,
+      p.isBanned ? 'Banned' : 'Active',
+      p.isAdmin ? 'Admin' : 'Player'
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `royal_poker_players_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    soundManager.playWinSound();
+    showToast('📊 Oyunçuların məlumat bazası CSV faylı olaraq ixrac edildi!');
+  };
+
+  // Proactive Action: Direct Gift Credit from Chat
+  const handleDirectChatGift = async (amount: number, type: 'real' | 'bonus') => {
+    if (!selectedChatUserId) return;
+    const player = players.find(p => p.id === selectedChatUserId);
+    if (!player) return;
+
+    await handleQuickBalanceAdjust(player, amount, 'add', type);
+    // Send automated notification message into the thread
+    await handleSendAdminReply(undefined, `🎁 Təbriklər! Admin tərəfindən hesabınıza +$${amount.toFixed(2)} ${type === 'real' ? 'Real Pul' : 'Hədiyyə Bonusu'} əlavə edildi!`);
+  };
+
+  // Proactive Action: Send Broadcast Banner to all tables
+  const handleBroadcastAnnouncement = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!broadcastInput.trim()) {
+      showToast('⚠️ Zəhmət olmasa elan mətni yazın');
+      return;
+    }
+    setIsBroadcasting(true);
+    const updated = { ...systemConfig, systemAnnouncement: broadcastInput.trim() };
+    setSystemConfig(updated);
+    adminStorage.saveConfig(updated);
+    await saveSystemConfigToFirestore(updated);
+    soundManager.playWinSound();
+    confetti({ particleCount: 50, spread: 60 });
+    showToast('📢 Canlı Elan bütün masalara və lobbiyə yayımlandı!');
+    setIsBroadcasting(false);
   };
 
   // Action: Save System Config
@@ -633,7 +899,22 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         {/* Navigation Tabs */}
         <div className="flex items-center space-x-1 sm:space-x-2 px-3 sm:px-6 pt-3 pb-2 bg-zinc-950 border-b border-zinc-800/80 overflow-x-auto no-scrollbar">
           <button
-            onClick={() => setActiveTab('users')}
+            onClick={() => { setActiveTab('tables'); soundManager.playButtonClick(); }}
+            className={`relative flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap cursor-pointer ${
+              activeTab === 'tables'
+                ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-zinc-950 shadow-lg shadow-amber-500/25 ring-1 ring-amber-300'
+                : 'bg-zinc-900 hover:bg-zinc-850 text-amber-400 border border-amber-500/30'
+            }`}
+          >
+            <Layers className="w-4 h-4 text-amber-400" />
+            <span>🎴 Canlı Masalar & İdarəetmə</span>
+            <span className="px-1.5 py-0.2 rounded-full bg-zinc-950 text-amber-300 font-mono text-[10px] font-black">
+              {tables.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => { setActiveTab('users'); soundManager.playButtonClick(); }}
             className={`relative flex items-center space-x-2 px-3 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
               activeTab === 'users'
                 ? 'bg-amber-500 text-zinc-950 shadow-md shadow-amber-500/20'
@@ -760,152 +1041,821 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         {/* Tab Contents */}
         <div className="flex-1 p-3 sm:p-6 overflow-y-auto space-y-4">
           
-          {/* TAB 1: USERS LIST & MANAGEMENT */}
-          {activeTab === 'users' && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
-                <div className="relative w-full sm:w-80">
+          {/* TAB 0: CANLI MASALAR & MƏRKƏZİ İDARƏETMƏ */}
+          {activeTab === 'tables' && (
+            <div className="space-y-5">
+              {/* Header Overview Banner */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-amber-950/40 via-zinc-900 to-zinc-950 border border-amber-500/30 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center space-x-3.5">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-amber-500 to-amber-600 p-0.5 flex items-center justify-center shadow-lg shadow-amber-500/20 shrink-0">
+                    <div className="w-full h-full bg-zinc-950 rounded-[14px] flex items-center justify-center">
+                      <Layers className="w-6 h-6 text-amber-400" />
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black text-white flex items-center space-x-2">
+                      <span>Canlı Masalar & Mərkəzi İdarəetmə Paneli</span>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-black uppercase tracking-wider">
+                        Real-Time
+                      </span>
+                    </h3>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      Bütün aktiv masaları canlı izləyin, istənilən oyunçunu dərhal masadan kənarlaşdırın (Kick), 1 kliklə %95 Pro Botlar əlavə edin/çıxarın və ya masaları bağlayın.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-2 shrink-0">
+                  {onOpenNewTableModal && (
+                    <button
+                      type="button"
+                      onClick={() => { onOpenNewTableModal(); soundManager.playButtonClick(); }}
+                      className="px-3.5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-black rounded-xl text-xs flex items-center space-x-2 shadow-lg shadow-amber-500/25 transition-all cursor-pointer active:scale-95"
+                    >
+                      <Plus className="w-4 h-4 stroke-[3]" />
+                      <span>➕ Yeni Masa Yarat</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Quick Table Stats */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-zinc-900/80 border border-zinc-800 p-3.5 rounded-2xl">
+                  <div className="text-zinc-400 text-xs font-bold">Aktiv Masalar</div>
+                  <div className="text-xl font-black text-amber-400 font-mono mt-0.5">{tables.length}</div>
+                </div>
+                <div className="bg-zinc-900/80 border border-zinc-800 p-3.5 rounded-2xl">
+                  <div className="text-zinc-400 text-xs font-bold">Oturmuş Oyunçular</div>
+                  <div className="text-xl font-black text-emerald-400 font-mono mt-0.5">
+                    {tables.reduce((acc, t) => acc + (t.players || []).filter(p => p !== null).length, 0)}
+                  </div>
+                </div>
+                <div className="bg-zinc-900/80 border border-zinc-800 p-3.5 rounded-2xl">
+                  <div className="text-zinc-400 text-xs font-bold">İnsan / Bot Nisbəti</div>
+                  <div className="text-xl font-black text-purple-300 font-mono mt-0.5">
+                    {tables.reduce((acc, t) => acc + (t.players || []).filter(p => p && p.isHuman).length, 0)} İnsan / {tables.reduce((acc, t) => acc + (t.players || []).filter(p => p && !p.isHuman).length, 0)} Bot
+                  </div>
+                </div>
+                <div className="bg-zinc-900/80 border border-zinc-800 p-3.5 rounded-2xl">
+                  <div className="text-zinc-400 text-xs font-bold">AI Bot Səviyyəsi</div>
+                  <div className="text-xl font-black text-amber-300 font-mono mt-0.5 flex items-center space-x-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                    <span>%95 Pro AI</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Search, Stakes Filter & Display Mode Toggle */}
+              <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 bg-zinc-900/80 p-3 rounded-2xl border border-zinc-800">
+                <div className="relative flex-1 lg:max-w-xs">
                   <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="Ad, e-poçt və ya ID ilə axtarın..."
-                    className="w-full bg-zinc-900 border border-zinc-750 rounded-xl pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500"
+                    value={searchTableTerm}
+                    onChange={(e) => setSearchTableTerm(e.target.value)}
+                    placeholder="Masa adı və ya ID ilə axtar..."
+                    className="w-full bg-zinc-950 border border-zinc-750 rounded-xl pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500 font-medium"
                   />
+                  {searchTableTerm && (
+                    <button
+                      onClick={() => setSearchTableTerm('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 text-xs"
+                    >
+                      ✕
+                    </button>
+                  )}
                 </div>
-                <div className="text-xs text-zinc-400 flex items-center space-x-2">
-                  <span>Göstərilir: <b className="text-amber-300">{filteredPlayers.length}</b> oyunçu</span>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center space-x-1.5 overflow-x-auto no-scrollbar">
+                    {[
+                      { id: 'all', label: 'Bütün Masalar' },
+                      { id: 'micro', label: 'Micro ($0.01/$0.02)' },
+                      { id: 'low', label: 'Low ($0.05 - $0.20)' },
+                      { id: 'mid', label: 'Mid ($0.25 - $1.00)' },
+                      { id: 'high', label: 'High ($2.00+)' },
+                    ].map((filter) => (
+                      <button
+                        key={filter.id}
+                        type="button"
+                        onClick={() => setTableFilterStakes(filter.id as any)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                          tableFilterStakes === filter.id
+                            ? 'bg-amber-500 text-zinc-950 font-black shadow'
+                            : 'bg-zinc-950 hover:bg-zinc-850 text-zinc-400 border border-zinc-800'
+                        }`}
+                      >
+                        {filter.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* View Mode Toggle: Figure vs List */}
+                  <div className="flex items-center bg-zinc-950 p-1 rounded-xl border border-zinc-800">
+                    <button
+                      type="button"
+                      onClick={() => setTableDisplayMode('figure')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center space-x-1.5 transition-all cursor-pointer ${
+                        tableDisplayMode === 'figure'
+                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                      title="Masaları real oval poker masası fiqurunda göstər"
+                    >
+                      <span>🎴 Qrafik Fiqur</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTableDisplayMode('list')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center space-x-1.5 transition-all cursor-pointer ${
+                        tableDisplayMode === 'list'
+                          ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-zinc-950 shadow-md'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                      title="Masaları oturacaq siyahısı cədvəlində göstər"
+                    >
+                      <span>📋 Siyahı</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Active Tables List */}
+              <div className="space-y-6">
+                {tables
+                  .filter((t) => {
+                    if (searchTableTerm) {
+                      const term = searchTableTerm.toLowerCase();
+                      const matchName = t.name.toLowerCase().includes(term);
+                      const matchId = t.id.toLowerCase().includes(term);
+                      if (!matchName && !matchId) return false;
+                    }
+                    if (tableFilterStakes === 'micro') return t.bigBlind <= 0.02;
+                    if (tableFilterStakes === 'low') return t.bigBlind > 0.02 && t.bigBlind <= 0.20;
+                    if (tableFilterStakes === 'mid') return t.bigBlind > 0.20 && t.bigBlind <= 1.00;
+                    if (tableFilterStakes === 'high') return t.bigBlind > 1.00;
+                    return true;
+                  })
+                  .map((t) => {
+                    const seatedPlayers = (t.players || []).map((p, idx) => ({ player: p, seatIndex: idx }));
+                    const activeCount = (t.players || []).filter((p) => p !== null).length;
+                    const humanCount = (t.players || []).filter((p) => p && p.isHuman).length;
+                    const botCount = (t.players || []).filter((p) => p && !p.isHuman).length;
+
+                    return (
+                      <div
+                        key={t.id}
+                        className="p-4 sm:p-5 rounded-3xl bg-zinc-900/90 border border-zinc-800 hover:border-amber-500/40 shadow-2xl space-y-4 transition-all"
+                      >
+                        {/* Table Header & Info */}
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-zinc-800/80">
+                          <div className="flex items-center space-x-3">
+                            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center font-black text-white text-base shadow-lg ring-1 ring-emerald-400/40">
+                              ♠
+                            </div>
+                            <div>
+                              <div className="flex items-center space-x-2">
+                                <h4 className="text-base font-black text-white">{t.name}</h4>
+                                <span className="px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-300 text-[10px] font-mono font-bold">
+                                  ID: {t.id}
+                                </span>
+                                {t.isCustomCreated && (
+                                  <span className="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[10px] font-bold">
+                                    Xüsusi Masa
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2 mt-1 text-xs text-zinc-400">
+                                <span className="text-amber-400 font-bold font-mono">
+                                  Blinds: ${t.smallBlind.toFixed(2)} / ${t.bigBlind.toFixed(2)}
+                                </span>
+                                <span>•</span>
+                                <span className="text-zinc-300">
+                                  Növ: {t.gameType === 'omaha' ? 'Omaha Poker' : "Texas Hold'em"}
+                                </span>
+                                <span>•</span>
+                                <span className="text-emerald-400 font-bold">
+                                  Oturacaq: {activeCount}/{t.capacity} ({humanCount} İnsan, {botCount} Bot)
+                                </span>
+                                <span>•</span>
+                                <span className="text-amber-300 font-mono font-bold">
+                                  Bank: ${(t.pot || 0).toFixed(2)}
+                                </span>
+                                <span>•</span>
+                                <span className="px-2 py-0.2 rounded-full bg-zinc-800 text-amber-300 font-mono text-[10px] uppercase font-bold">
+                                  Mərhələ: {t.stage}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Quick Table Control Action Buttons */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            {/* Add Pro Bot Button */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (onAddBotToTable) {
+                                  onAddBotToTable(t.id);
+                                  soundManager.playChipSound();
+                                  confetti({ particleCount: 30, spread: 45 });
+                                  showToast(`🤖 ${t.name} masasına %95 Pro AI Bot əlavə edildi!`);
+                                }
+                              }}
+                              disabled={activeCount >= t.capacity}
+                              className={`px-3 py-2 rounded-xl text-xs font-black flex items-center space-x-1.5 transition-all cursor-pointer shadow ${
+                                activeCount >= t.capacity
+                                  ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                                  : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-purple-500/20 active:scale-95'
+                              }`}
+                              title="Masaya bir kliklə 95% Pro AI Bot əlavə et"
+                            >
+                              <Bot className="w-3.5 h-3.5 text-purple-200" />
+                              <span>+ Pro Bot</span>
+                            </button>
+
+                            {/* Remove Bot Button */}
+                            {botCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onRemoveBotFromTable) {
+                                    onRemoveBotFromTable(t.id);
+                                    soundManager.playButtonClick();
+                                    showToast(`🧹 ${t.name} masasından 1 bot çıxarıldı.`);
+                                  }
+                                }}
+                                className="px-2.5 py-2 bg-zinc-800 hover:bg-zinc-750 text-purple-300 border border-purple-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                                title="Masadan 1 botu kənarlaşdır"
+                              >
+                                <UserMinus className="w-3.5 h-3.5 text-purple-300" />
+                                <span>Bot Çıxar</span>
+                              </button>
+                            )}
+
+                            {/* Change Limits Button */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingTableLimits({
+                                  id: t.id,
+                                  name: t.name,
+                                  smallBlind: t.smallBlind,
+                                  bigBlind: t.bigBlind,
+                                });
+                                setNewSbInput(String(t.smallBlind));
+                                setNewBbInput(String(t.bigBlind));
+                              }}
+                              className="px-2.5 py-2 bg-zinc-800 hover:bg-zinc-750 text-amber-300 border border-amber-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                              title="Small Blind və Big Blind limitlərini dəyiş"
+                            >
+                              <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Limitlər</span>
+                            </button>
+
+                            {/* Spectate Table Button */}
+                            {onSpectateTable && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onSpectateTable(t);
+                                  onClose();
+                                }}
+                                className="px-2.5 py-2 bg-zinc-800 hover:bg-zinc-750 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                                title="Masanı canlı izləyin"
+                              >
+                                <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>İzlə</span>
+                              </button>
+                            )}
+
+                            {/* Close Table Button */}
+                            {onCloseTable && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (confirm(`"${t.name}" masasını tamamilə bağlamaq istədiyinizə əminsiniz? Bütün oyunçular lobbiyə atılacaq.`)) {
+                                    onCloseTable(t.id);
+                                    soundManager.playErrorSound();
+                                    showToast(`⛔ "${t.name}" masası bağlandı.`);
+                                  }
+                                }}
+                                className="px-2.5 py-2 bg-red-950/50 hover:bg-red-900/60 text-red-400 border border-red-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer active:scale-95"
+                                title="Masanı tamamilə bağla"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                <span>Bağla</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* RENDER TABLE CONTENT: EITHER GRAPHICAL POKER TABLE FIGURE OR SEAT GRID */}
+                        {tableDisplayMode === 'figure' ? (
+                          <AdminTableFigure
+                            table={t}
+                            onKickPlayer={onKickPlayer}
+                            onAddBotToTable={onAddBotToTable}
+                            onRemoveBotFromTable={onRemoveBotFromTable}
+                            showToast={showToast}
+                          />
+                        ) : (
+                          /* Seated Players Grid on Table (List Mode) */
+                          <div className="space-y-2">
+                            <div className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+                              <span>Masadakı Oyunçular (Üzərinə basaraq masadan çıxara bilərsiniz):</span>
+                              <span className="text-zinc-500">
+                                {activeCount === 0 ? 'Heç bir oyunçu yoxdur' : `${activeCount} / ${t.capacity} yer doludur`}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5">
+                              {Array.from({ length: t.capacity }).map((_, seatIdx) => {
+                                const seatData = seatedPlayers.find((sp) => sp.seatIndex === seatIdx);
+                                const player = seatData?.player;
+
+                                if (player) {
+                                  return (
+                                    <div
+                                      key={player.id || seatIdx}
+                                      onClick={() => {
+                                        if (confirm(`"${player.name}" (${player.isHuman ? 'İnsan' : 'Bot'}) oyunçusunu masadan xaric etmək (Kick) istədiyinizə əminsiniz?`)) {
+                                          if (onKickPlayer) {
+                                            onKickPlayer(t.id, player.id);
+                                            soundManager.playErrorSound();
+                                            showToast(`⛔ "${player.name}" masadan xaric edildi.`);
+                                          }
+                                        }
+                                      }}
+                                      className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 shadow-sm transition-all cursor-pointer hover:border-red-500 hover:bg-red-950/40 group ${
+                                        player.isHuman
+                                          ? 'bg-zinc-950/80 border-emerald-500/40'
+                                          : 'bg-purple-950/30 border-purple-500/40'
+                                      }`}
+                                      title="Oyunçunu masadan çıxartmaq (Kick) üçün klikləyin"
+                                    >
+                                      <div className="flex items-center space-x-2 min-w-0">
+                                        <div className="relative shrink-0">
+                                          <img
+                                            src={player.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${player.name}`}
+                                            alt={player.name}
+                                            className="w-8 h-8 rounded-full border border-zinc-700 bg-zinc-900 object-cover group-hover:border-red-500"
+                                          />
+                                          <span className="absolute -top-1 -left-1 px-1 rounded bg-zinc-800 text-zinc-300 text-[8px] font-mono font-bold">
+                                            #{seatIdx + 1}
+                                          </span>
+                                        </div>
+                                        <div className="min-w-0">
+                                          <div className="flex items-center space-x-1">
+                                            <span className="text-xs font-bold text-white truncate group-hover:text-red-300">
+                                              {player.name}
+                                            </span>
+                                            {player.isHuman ? (
+                                              <span className="px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[8px] font-bold shrink-0">
+                                                İnsan
+                                              </span>
+                                            ) : (
+                                              <span className="px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 text-[8px] font-bold shrink-0">
+                                                %95 Pro Bot
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="text-[11px] font-mono font-bold text-amber-400">
+                                            ${(player.chips || 0).toFixed(2)}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* KICK BUTTON */}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (confirm(`"${player.name}" oyunçusunu masadan xaric etmək (Kick) istədiyinizə əminsiniz?`)) {
+                                            if (onKickPlayer) {
+                                              onKickPlayer(t.id, player.id);
+                                              soundManager.playErrorSound();
+                                              showToast(`⛔ "${player.name}" masadan xaric edildi.`);
+                                            }
+                                          }
+                                        }}
+                                        className="px-2 py-1 bg-red-950/70 hover:bg-red-900 border border-red-500/40 hover:border-red-400 text-red-300 rounded-lg text-[10.5px] font-black transition-all cursor-pointer active:scale-95 shrink-0 flex items-center space-x-1"
+                                        title="Oyunçunu dərhal masadan xaric et"
+                                      >
+                                        <UserX className="w-3 h-3 text-red-400" />
+                                        <span>Kick</span>
+                                      </button>
+                                    </div>
+                                  );
+                                }
+
+                                // Empty Seat -> Quick Pro Bot Sit-In
+                                return (
+                                  <div
+                                    key={seatIdx}
+                                    className="p-2.5 rounded-xl border border-dashed border-zinc-800 bg-zinc-950/30 flex items-center justify-between text-xs text-zinc-500"
+                                  >
+                                    <div className="flex items-center space-x-2">
+                                      <span className="w-7 h-7 rounded-full bg-zinc-900 flex items-center justify-center font-mono text-[10px] text-zinc-600">
+                                        #{seatIdx + 1}
+                                      </span>
+                                      <span className="text-zinc-600 font-medium text-[11px]">Boş Yer</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (onAddBotToTable) {
+                                          onAddBotToTable(t.id);
+                                          soundManager.playChipSound();
+                                          showToast(`🤖 Yer #${seatIdx + 1}-ə Pro Bot otuzduruldu.`);
+                                        }
+                                      }}
+                                      className="px-2 py-1 bg-zinc-900 hover:bg-purple-950/60 text-zinc-400 hover:text-purple-300 border border-zinc-800 hover:border-purple-500/30 rounded-lg text-[10px] font-bold transition-all cursor-pointer"
+                                    >
+                                      + Pro Bot
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+
+              {/* Sub-Modal: Change Table Limits */}
+              <AnimatePresence>
+                {editingTableLimits && (
+                  <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+                    <motion.div
+                      initial={{ scale: 0.95, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.95, opacity: 0 }}
+                      className="w-full max-w-md bg-zinc-950 border border-amber-500/50 rounded-2xl p-5 shadow-2xl space-y-4 text-zinc-100"
+                    >
+                      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+                        <div className="flex items-center space-x-2">
+                          <SlidersHorizontal className="w-5 h-5 text-amber-400" />
+                          <h3 className="text-sm font-black text-white">
+                            Limitləri Tənzimlə: {editingTableLimits.name}
+                          </h3>
+                        </div>
+                        <button
+                          onClick={() => setEditingTableLimits(null)}
+                          className="p-1 rounded-lg bg-zinc-900 text-zinc-400 hover:text-white"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-bold text-zinc-300 mb-1">
+                            Small Blind ($)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={newSbInput}
+                            onChange={(e) => setNewSbInput(e.target.value)}
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-amber-300 font-mono font-bold focus:outline-none focus:border-amber-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-zinc-300 mb-1">
+                            Big Blind ($)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={newBbInput}
+                            onChange={(e) => setNewBbInput(e.target.value)}
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-sm text-amber-300 font-mono font-bold focus:outline-none focus:border-amber-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditingTableLimits(null)}
+                          className="flex-1 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-850 text-zinc-300 text-xs font-bold transition-colors cursor-pointer"
+                        >
+                          Ləğv Et
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const sb = parseFloat(newSbInput);
+                            const bb = parseFloat(newBbInput);
+                            if (isNaN(sb) || isNaN(bb) || sb <= 0 || bb <= 0 || sb > bb) {
+                              showToast('❌ Zəhmət olmasa düzgün Small Blind və Big Blind daxil edin (SB <= BB)');
+                              return;
+                            }
+                            if (onUpdateTableLimits) {
+                              onUpdateTableLimits(editingTableLimits.id, sb, bb);
+                              soundManager.playChipSound();
+                              showToast(`✅ "${editingTableLimits.name}" limitləri yeniləndi: $${sb.toFixed(2)} / $${bb.toFixed(2)}`);
+                            }
+                            setEditingTableLimits(null);
+                          }}
+                          className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 text-zinc-950 text-xs font-black transition-all cursor-pointer shadow-lg shadow-amber-500/25 active:scale-95"
+                        >
+                          Təsdiqlə və Tətbiq Et
+                        </button>
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+          
+          {/* TAB 1: USERS LIST & MANAGEMENT */}
+          {activeTab === 'users' && (
+            <div className="space-y-4">
+              {/* Top Controls: Search, Category Filter Pills & CSV Export */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-zinc-900/80 p-3.5 rounded-2xl border border-zinc-800">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 flex-1">
+                  <div className="relative flex-1 sm:max-w-xs">
+                    <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      placeholder="Ad, e-poçt və ya ID ilə axtarın..."
+                      className="w-full bg-zinc-950 border border-zinc-750 rounded-xl pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500 font-medium"
+                    />
+                    {searchTerm && (
+                      <button
+                        onClick={() => setSearchTerm('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 text-xs"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Proactive Category Pills */}
+                  <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar py-0.5">
+                    {[
+                      { id: 'all', label: 'Bütün Oyunçular', icon: Users, count: players.length },
+                      { id: 'high_rollers', label: '🔥 Yüksək Balans (>$50)', count: players.filter(p => (p.realBalance || 0) >= 50).length },
+                      { id: 'vip', label: '👑 VIP Oyunçular', count: players.filter(p => (p.vipLevel || 1) >= 2).length },
+                      { id: 'banned', label: '🚫 Dondurulmuşlar', count: players.filter(p => !!p.isBanned).length },
+                      { id: 'messages', label: '💬 Oxunmamış', count: players.filter(p => supportMessages.some(m => m.userId === p.id && m.sender === 'user' && !m.readByAdmin)).length }
+                    ].map((cat) => (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => { setUserCategoryFilter(cat.id as any); soundManager.playButtonClick(); }}
+                        className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all cursor-pointer flex items-center space-x-1.5 ${
+                          userCategoryFilter === cat.id
+                            ? 'bg-amber-500 text-zinc-950 shadow-md shadow-amber-500/20 font-black'
+                            : 'bg-zinc-950 hover:bg-zinc-850 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
+                        }`}
+                      >
+                        <span>{cat.label}</span>
+                        <span className={`text-[9.5px] px-1.5 py-0.2 rounded-full font-mono ${
+                          userCategoryFilter === cat.id ? 'bg-zinc-950 text-amber-300 font-black' : 'bg-zinc-850 text-zinc-400'
+                        }`}>
+                          {cat.count}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Right Action: CSV Export & Reload */}
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleExportPlayersCSV}
+                    className="px-3 py-2 bg-zinc-950 hover:bg-zinc-850 text-emerald-400 border border-emerald-500/30 hover:border-emerald-500/60 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer shadow-sm active:scale-95"
+                    title="Bütün oyunçuları Excel/CSV formatında yüklə"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>📊 CSV İxrac Et</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { loadAllData(); soundManager.playButtonClick(); }}
+                    className="p-2 bg-zinc-950 hover:bg-zinc-850 text-zinc-400 hover:text-white border border-zinc-800 rounded-xl transition-colors cursor-pointer"
+                    title="Yenilə"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPlayers ? 'animate-spin text-amber-400' : ''}`} />
+                  </button>
                 </div>
               </div>
 
               {/* Players Table */}
-              <div className="border border-zinc-800 rounded-2xl bg-zinc-900/60 overflow-hidden">
+              <div className="border border-zinc-800 rounded-2xl bg-zinc-900/60 overflow-hidden shadow-xl">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
-                    <thead className="bg-zinc-950/80 border-b border-zinc-800 text-zinc-400 uppercase tracking-wider font-semibold text-[10.5px]">
+                    <thead className="bg-zinc-950 border-b border-zinc-800 text-zinc-400 uppercase tracking-wider font-bold text-[10.5px]">
                       <tr>
                         <th className="px-4 py-3">Oyunçu</th>
                         <th className="px-4 py-3">E-poçt</th>
                         <th className="px-4 py-3">Real Balans</th>
                         <th className="px-4 py-3">Bonus</th>
-                        <th className="px-4 py-3">VIP</th>
+                        <th className="px-4 py-3">VIP Səviyyə</th>
                         <th className="px-4 py-3">Status</th>
-                        <th className="px-4 py-3 text-right">Əməliyyatlar</th>
+                        <th className="px-4 py-3 text-right">Proaktiv Əməliyyatlar</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/60">
-                      {filteredPlayers.map((player) => {
-                        const isAdmin = player.isAdmin || player.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-                        const unreadMsgsCount = supportMessages.filter(
-                          (m) => m.userId === player.id && m.sender === 'user' && !m.readByAdmin
-                        ).length;
-                        const totalMsgsCount = supportMessages.filter((m) => m.userId === player.id).length;
+                      {filteredPlayers.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="text-center py-8 text-zinc-500 text-xs">
+                            Heç bir uyğun oyunçu tapılmadı.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredPlayers.map((player) => {
+                          const isAdmin = player.isAdmin || player.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+                          const unreadMsgsCount = supportMessages.filter(
+                            (m) => m.userId === player.id && m.sender === 'user' && !m.readByAdmin
+                          ).length;
+                          const totalMsgsCount = supportMessages.filter((m) => m.userId === player.id).length;
+                          const isActingOnThis = activeActionPlayerId === player.id;
 
-                        return (
-                          <tr key={player.id} className="hover:bg-zinc-850/50 transition-colors">
-                            <td className="px-4 py-3">
-                              <div className="flex items-center space-x-2.5">
-                                <div className="relative shrink-0">
-                                  <img
-                                    src={player.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100'}
-                                    alt={player.username}
-                                    referrerPolicy="no-referrer"
-                                    className="w-8 h-8 rounded-full border border-amber-400/40 object-cover"
-                                  />
-                                  {unreadMsgsCount > 0 && (
-                                    <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-red-500 rounded-full border-2 border-zinc-900 flex items-center justify-center animate-pulse">
-                                      <span className="text-[8px] font-black text-white">{unreadMsgsCount}</span>
-                                    </span>
-                                  )}
-                                </div>
-                                <div>
-                                  <div className="font-bold text-white flex items-center space-x-1.5 flex-wrap">
-                                    <span>{player.username}</span>
-                                    {isAdmin && <span className="text-amber-400">👑</span>}
+                          return (
+                            <tr key={player.id} className="hover:bg-zinc-850/50 transition-colors">
+                              {/* Player Avatar & Details */}
+                              <td className="px-4 py-3">
+                                <div className="flex items-center space-x-2.5">
+                                  <div className="relative shrink-0">
+                                    <img
+                                      src={player.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100'}
+                                      alt={player.username}
+                                      referrerPolicy="no-referrer"
+                                      className="w-9 h-9 rounded-full border border-amber-400/40 object-cover"
+                                    />
                                     {unreadMsgsCount > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleSelectUserChat(player.id)}
-                                        className="inline-flex items-center space-x-1 px-1.5 py-0.2 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500 hover:text-white transition-all text-[9.5px] font-bold cursor-pointer animate-pulse"
-                                        title="Mesajı oxumaq üçün klikləyin"
-                                      >
-                                        <MessageSquare className="w-2.5 h-2.5" />
-                                        <span>{unreadMsgsCount} yeni mesaj</span>
-                                      </button>
+                                      <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full border-2 border-zinc-900 flex items-center justify-center animate-pulse">
+                                        <span className="text-[8px] font-black text-white">{unreadMsgsCount}</span>
+                                      </span>
                                     )}
                                   </div>
-                                  <div className="text-[10px] text-zinc-500 font-mono">ID: {player.id.slice(0, 10)}...</div>
+                                  <div>
+                                    <div className="font-bold text-white flex items-center space-x-1.5 flex-wrap">
+                                      <span className="text-sm">{player.username}</span>
+                                      {isAdmin && (
+                                        <span className="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9.5px] font-black">
+                                          👑 ADMIN
+                                        </span>
+                                      )}
+                                      {unreadMsgsCount > 0 && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSelectUserChat(player.id)}
+                                          className="inline-flex items-center space-x-1 px-1.5 py-0.2 rounded-full bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500 hover:text-white transition-all text-[9.5px] font-bold cursor-pointer animate-pulse"
+                                          title="Mesajı oxumaq üçün klikləyin"
+                                        >
+                                          <MessageSquare className="w-2.5 h-2.5" />
+                                          <span>{unreadMsgsCount} yeni mesaj</span>
+                                        </button>
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] text-zinc-500 font-mono">ID: {player.id.slice(0, 10)}...</div>
+                                  </div>
                                 </div>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-zinc-300 font-mono text-[11px]">
-                              {player.email || '—'}
-                            </td>
-                            <td className="px-4 py-3 font-mono font-black text-amber-400 text-sm">
-                              ${(player.realBalance || 0).toFixed(2)}
-                            </td>
-                            <td className="px-4 py-3 font-mono text-zinc-300">
-                              ${(player.bonusBalance || 0).toFixed(2)}
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 text-[10px] font-bold">
-                                VIP {player.vipLevel || 1}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              {player.isBanned ? (
-                                <span className="px-2 py-0.5 rounded-full bg-red-950 text-red-300 border border-red-800 text-[10px] font-black">
-                                  🚫 Dondurulub
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold">
-                                  🟢 Aktiv
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <div className="flex items-center justify-end space-x-1.5">
-                                <button
-                                  onClick={() => handleSelectUserChat(player.id)}
-                                  title={`Şəxsi mesaj yaz (${totalMsgsCount} mesaj mövcuddur)`}
-                                  className={`px-2.5 py-1 rounded-lg font-bold text-[11px] flex items-center space-x-1 transition-all cursor-pointer ${
-                                    unreadMsgsCount > 0
-                                      ? 'bg-red-500 hover:bg-red-600 text-white shadow-md shadow-red-500/30 animate-pulse'
-                                      : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-amber-400 border border-zinc-700'
-                                  }`}
-                                >
-                                  <MessageSquare className="w-3 h-3" />
-                                  <span>{unreadMsgsCount > 0 ? `Mesaj (${unreadMsgsCount})` : 'Mesaj'}</span>
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setEditingPlayer(player);
-                                    setBalanceDelta('');
-                                    setBalanceMode('add');
-                                  }}
-                                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 border border-amber-500/40 rounded-lg font-bold text-[11px] transition-all cursor-pointer"
-                                >
-                                  Balans Dəyiş
-                                </button>
-                                {!isAdmin && (
+                              </td>
+
+                              {/* Email */}
+                              <td className="px-4 py-3 text-zinc-300 font-mono text-[11px]">
+                                {player.email || '—'}
+                              </td>
+
+                              {/* Real Balance */}
+                              <td className="px-4 py-3 font-mono font-black text-amber-400 text-sm">
+                                ${(player.realBalance || 0).toFixed(2)}
+                              </td>
+
+                              {/* Bonus Balance */}
+                              <td className="px-4 py-3 font-mono text-zinc-300">
+                                ${(player.bonusBalance || 0).toFixed(2)}
+                              </td>
+
+                              {/* Interactive VIP Level Switcher */}
+                              <td className="px-4 py-3">
+                                <div className="flex items-center space-x-1">
+                                  {[1, 2, 3, 4, 5].map((lvl) => {
+                                    const isCurrent = (player.vipLevel || 1) === lvl;
+                                    return (
+                                      <button
+                                        key={lvl}
+                                        type="button"
+                                        disabled={isActingOnThis}
+                                        onClick={() => handleQuickVipChange(player, lvl)}
+                                        title={`VIP ${lvl} səviyyəsinə təyin et`}
+                                        className={`w-6 h-6 rounded-lg text-[10px] font-black transition-all cursor-pointer flex items-center justify-center ${
+                                          isCurrent
+                                            ? 'bg-amber-500 text-zinc-950 font-black shadow ring-1 ring-amber-300 scale-110'
+                                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-amber-300'
+                                        }`}
+                                      >
+                                        {lvl}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </td>
+
+                              {/* Status */}
+                              <td className="px-4 py-3">
+                                {player.isBanned ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-red-950 text-red-300 border border-red-800 text-[10px] font-black inline-flex items-center space-x-1">
+                                    <Ban className="w-3 h-3" />
+                                    <span>Dondurulub</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 text-[10px] font-bold inline-flex items-center space-x-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                                    <span>Aktiv</span>
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Proactive Actions Cell */}
+                              <td className="px-4 py-3 text-right">
+                                <div className="flex items-center justify-end space-x-1.5 flex-wrap gap-y-1">
+                                  {/* Quick Presets: +$10, +$50, +$100 */}
+                                  <div className="flex items-center space-x-1 bg-zinc-950/80 p-0.5 rounded-lg border border-zinc-800">
+                                    {[10, 50, 100].map((amt) => (
+                                      <button
+                                        key={amt}
+                                        type="button"
+                                        disabled={isActingOnThis}
+                                        onClick={() => handleQuickBalanceAdjust(player, amt, 'add', 'real')}
+                                        title={`${player.username} balansına dərhal +$${amt} əlavə et`}
+                                        className="px-1.5 py-0.5 bg-emerald-950/60 hover:bg-emerald-500 text-emerald-300 hover:text-zinc-950 border border-emerald-800/60 hover:border-emerald-400 rounded text-[10px] font-mono font-bold transition-all cursor-pointer active:scale-95"
+                                      >
+                                        +${amt}
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  {/* Reset Sit-Out if player missed turns or sitting out */}
                                   <button
-                                    onClick={() => handleToggleBan(player)}
-                                    title={player.isBanned ? 'Blokdan çıxar' : 'Dondur / Blokla'}
-                                    className={`p-1 rounded-lg border text-xs transition-colors cursor-pointer ${
-                                      player.isBanned
-                                        ? 'bg-emerald-950/60 border-emerald-700 text-emerald-300 hover:bg-emerald-800'
-                                        : 'bg-red-950/60 border-red-800 text-red-300 hover:bg-red-900'
+                                    type="button"
+                                    disabled={isActingOnThis}
+                                    onClick={() => handleResetPlayerSitOut(player)}
+                                    title="Fasilə / Sit-Out vəziyyətini sıfırla"
+                                    className="p-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700 text-xs transition-colors cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                  </button>
+
+                                  {/* Chat Message Button */}
+                                  <button
+                                    onClick={() => handleSelectUserChat(player.id)}
+                                    title={`Şəxsi mesaj yaz (${totalMsgsCount} mesaj)`}
+                                    className={`px-2.5 py-1 rounded-lg font-bold text-[11px] flex items-center space-x-1 transition-all cursor-pointer ${
+                                      unreadMsgsCount > 0
+                                        ? 'bg-red-500 hover:bg-red-600 text-white shadow-md shadow-red-500/30 animate-pulse'
+                                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-amber-400 border border-zinc-700'
                                     }`}
                                   >
-                                    {player.isBanned ? <Unlock className="w-3.5 h-3.5" /> : <Ban className="w-3.5 h-3.5" />}
+                                    <MessageSquare className="w-3 h-3" />
+                                    <span>{unreadMsgsCount > 0 ? `Mesaj (${unreadMsgsCount})` : 'Mesaj'}</span>
                                   </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
+
+                                  {/* Full Modal Balance Adjust */}
+                                  <button
+                                    onClick={() => {
+                                      setEditingPlayer(player);
+                                      setBalanceDelta('');
+                                      setBalanceMode('add');
+                                    }}
+                                    className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 border border-amber-500/40 rounded-lg font-bold text-[11px] transition-all cursor-pointer"
+                                  >
+                                    Balans Dəyiş
+                                  </button>
+
+                                  {/* Ban / Unban */}
+                                  {!isAdmin && (
+                                    <button
+                                      onClick={() => handleToggleBan(player)}
+                                      title={player.isBanned ? 'Blokdan çıxar' : 'Dondur / Blokla'}
+                                      className={`p-1 rounded-lg border text-xs transition-colors cursor-pointer ${
+                                        player.isBanned
+                                          ? 'bg-emerald-950/60 border-emerald-700 text-emerald-300 hover:bg-emerald-800'
+                                          : 'bg-red-950/60 border-red-800 text-red-300 hover:bg-red-900'
+                                      }`}
+                                    >
+                                      {player.isBanned ? <Unlock className="w-3.5 h-3.5" /> : <Ban className="w-3.5 h-3.5" />}
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -916,44 +1866,59 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           {/* TAB 2: DEPOSIT RECEIPTS & APPROVAL */}
           {activeTab === 'deposits' && (
             <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 bg-zinc-900/80 p-3.5 rounded-2xl border border-zinc-800">
                 <div>
                   <h3 className="text-sm font-bold text-zinc-200 flex items-center space-x-2">
                     <FileCheck className="w-4 h-4 text-amber-400" />
                     <span>Oyunçuların Yüklədiyi Bank Çekləri & Depozitlər</span>
                   </h3>
                   <p className="text-[11px] text-zinc-400 mt-0.5">
-                    Çekin şəklini və tarixini incələyib təsdiq etdikdən sonra məbləğ oyunçunun balansına köçürülür.
+                    Çekin şəklini və tarixini incələyib təsdiq etdikdən sonra məbləğ dərhal oyunçunun balansına köçürülür.
                   </p>
                 </div>
 
-                {/* Filter Pills */}
-                <div className="flex items-center space-x-1.5 bg-zinc-900/90 p-1 border border-zinc-800 rounded-xl shrink-0">
-                  {(['all', 'pending', 'completed', 'rejected'] as const).map((f) => {
-                    const count = f === 'all' 
-                      ? pendingDeposits.length 
-                      : f === 'pending'
-                      ? pendingDeposits.filter(d => d.status === 'pending' || d.status === 'processing').length
-                      : pendingDeposits.filter(d => d.status === f).length;
-                    return (
-                      <button
-                        key={f}
-                        onClick={() => { setDepositFilter(f); soundManager.playButtonClick(); }}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center space-x-1 ${
-                          depositFilter === f
-                            ? 'bg-amber-500/20 border border-amber-500/40 text-amber-300 shadow'
-                            : 'text-zinc-400 hover:text-zinc-200'
-                        }`}
-                      >
-                        <span className="capitalize">
-                          {f === 'all' ? 'Hamısı' : f === 'pending' ? 'Gözləyənlər' : f === 'completed' ? 'Təsdiqlənənlər' : 'İmtina'}
-                        </span>
-                        <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${depositFilter === f ? 'bg-amber-500 text-zinc-950 font-black' : 'bg-zinc-800 text-zinc-400'}`}>
-                          {count}
-                        </span>
-                      </button>
-                    );
-                  })}
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* Bulk Approve All Pending Deposits */}
+                  {pendingDeposits.filter(d => d.status === 'pending' || d.status === 'processing').length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isBulkApprovingDeposits}
+                      onClick={handleBulkApproveDeposits}
+                      className="px-3.5 py-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 disabled:opacity-50 text-zinc-950 font-black rounded-xl text-xs flex items-center space-x-1.5 shadow-lg shadow-emerald-500/20 active:scale-95 transition-all cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{isBulkApprovingDeposits ? 'Təsdiqlənir...' : `🚀 Bütün Gözləyənləri Təsdiqlə (${pendingDeposits.filter(d => d.status === 'pending' || d.status === 'processing').length})`}</span>
+                    </button>
+                  )}
+
+                  {/* Filter Pills */}
+                  <div className="flex items-center space-x-1.5 bg-zinc-950 p-1 border border-zinc-800 rounded-xl shrink-0">
+                    {(['all', 'pending', 'completed', 'rejected'] as const).map((f) => {
+                      const count = f === 'all' 
+                        ? pendingDeposits.length 
+                        : f === 'pending'
+                        ? pendingDeposits.filter(d => d.status === 'pending' || d.status === 'processing').length
+                        : pendingDeposits.filter(d => d.status === f).length;
+                      return (
+                        <button
+                          key={f}
+                          onClick={() => { setDepositFilter(f); soundManager.playButtonClick(); }}
+                          className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center space-x-1 ${
+                            depositFilter === f
+                              ? 'bg-amber-500 text-zinc-950 shadow font-black'
+                              : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                        >
+                          <span className="capitalize">
+                            {f === 'all' ? 'Hamısı' : f === 'pending' ? 'Gözləyənlər' : f === 'completed' ? 'Təsdiqlənənlər' : 'İmtina'}
+                          </span>
+                          <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${depositFilter === f ? 'bg-zinc-950 text-amber-300 font-black' : 'bg-zinc-850 text-zinc-400'}`}>
+                            {count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -1036,6 +2001,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                   onClick={() => {
                                     setInspectingDeposit(dep);
                                     setReceiptZoom(1);
+                                    setReceiptRotation(0);
                                     soundManager.playButtonClick();
                                   }}
                                   className="relative group w-16 h-16 rounded-xl border border-zinc-700 overflow-hidden bg-zinc-950 cursor-pointer shadow-md hover:border-amber-400 transition-all"
@@ -1064,6 +2030,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               onClick={() => {
                                 setInspectingDeposit(dep);
                                 setReceiptZoom(1);
+                                setReceiptRotation(0);
                                 soundManager.playButtonClick();
                               }}
                               className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-750 text-zinc-200 hover:text-white font-bold rounded-xl text-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
@@ -1103,13 +2070,32 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           {/* TAB 3: WITHDRAWAL REQUESTS */}
           {activeTab === 'withdrawals' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-zinc-200">
-                  Oyunçuların Pul Çıxarış Tələbləri (Ödənişlər)
-                </h3>
-                <span className="text-xs text-zinc-400">
-                  Cəmi: <b>{withdrawals.length}</b> müraciət
-                </span>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-zinc-900/80 p-3.5 rounded-2xl border border-zinc-800">
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-200">
+                    Oyunçuların Pul Çıxarış Tələbləri (Ödənişlər)
+                  </h3>
+                  <p className="text-[11px] text-zinc-400 mt-0.5">
+                    Kart nömrəsinə bir kliklə toxunaraq kopyalayın və ödənişi təsdiqləyin.
+                  </p>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  {withdrawals.filter(w => w.status === 'pending').length > 0 && (
+                    <button
+                      type="button"
+                      disabled={isBulkApprovingWithdrawals}
+                      onClick={handleBulkApproveWithdrawals}
+                      className="px-3.5 py-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 disabled:opacity-50 text-zinc-950 font-black rounded-xl text-xs flex items-center space-x-1.5 shadow-lg shadow-emerald-500/20 active:scale-95 transition-all cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{isBulkApprovingWithdrawals ? 'İcra Edilir...' : `⚡ Bütün Gözləyənləri Təsdiqlə (${withdrawals.filter(w => w.status === 'pending').length})`}</span>
+                    </button>
+                  )}
+                  <span className="text-xs text-zinc-400 font-mono">
+                    Cəmi: <b>{withdrawals.length}</b> müraciət
+                  </span>
+                </div>
               </div>
 
               {withdrawals.length === 0 ? (
@@ -1119,53 +2105,72 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-2.5">
-                  {withdrawals.map((w) => (
-                    <div
-                      key={w.id}
-                      className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
-                    >
-                      <div>
-                        <div className="flex items-center space-x-2">
-                          <span className="text-base font-black text-amber-400 font-mono">
-                            ${w.amount.toFixed(2)} {w.currency || 'USD'}
-                          </span>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                            w.status === 'approved'
-                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
-                              : w.status === 'rejected'
-                              ? 'bg-red-950 text-red-300 border border-red-700'
-                              : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                          }`}>
-                            {w.status === 'approved' ? 'Ödənildi' : w.status === 'rejected' ? 'İmtina Edildi' : 'Gözləyir'}
-                          </span>
-                        </div>
-                        <div className="text-xs text-zinc-300 mt-1">
-                          Oyunçu: <b>{w.username}</b> • Bank: <span className="text-zinc-400">{w.bankName || 'Kapital / ABB'}</span>
-                        </div>
-                        <div className="text-xs text-amber-300 font-mono mt-0.5">
-                          Kart Nömrəsi: <b>{w.cardNumber}</b>
-                        </div>
-                      </div>
+                  {withdrawals.map((w) => {
+                    const isCopied = copiedCardId === w.id;
+                    return (
+                      <div
+                        key={w.id}
+                        className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center space-x-2 flex-wrap">
+                            <span className="text-base font-black text-amber-400 font-mono">
+                              ${w.amount.toFixed(2)} {w.currency || 'USD'}
+                            </span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                              w.status === 'approved'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                                : w.status === 'rejected'
+                                ? 'bg-red-950 text-red-300 border border-red-700'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
+                            }`}>
+                              {w.status === 'approved' ? '✅ Ödənildi' : w.status === 'rejected' ? '❌ İmtina Edildi' : '⏳ Gözləyir'}
+                            </span>
+                          </div>
 
-                      {w.status === 'pending' && (
-                        <div className="flex items-center space-x-2 self-end sm:self-center">
-                          <button
-                            onClick={() => handleApproveWithdrawal(w.id)}
-                            className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black rounded-xl text-xs transition-colors flex items-center space-x-1 cursor-pointer"
-                          >
-                            <Check className="w-3.5 h-3.5 stroke-[3]" />
-                            <span>Ödəndi / Təsdiqlə</span>
-                          </button>
-                          <button
-                            onClick={() => handleRejectWithdrawal(w.id)}
-                            className="px-3 py-1.5 bg-red-950 hover:bg-red-900 border border-red-800 text-red-300 font-bold rounded-xl text-xs transition-colors cursor-pointer"
-                          >
-                            İmtina
-                          </button>
+                          <div className="text-xs text-zinc-300">
+                            Oyunçu: <b className="text-white">{w.username}</b> • Bank: <span className="text-zinc-400 font-semibold">{w.bankName || 'Kapital / ABB'}</span>
+                          </div>
+
+                          {/* 1-Click Copy Card Number Button */}
+                          <div className="flex items-center space-x-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handleCopyCardNumber(w.cardNumber, w.id)}
+                              className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold flex items-center space-x-1.5 transition-all cursor-pointer border ${
+                                isCopied
+                                  ? 'bg-emerald-500 text-zinc-950 border-emerald-400 shadow-md scale-102'
+                                  : 'bg-zinc-950 hover:bg-zinc-850 text-amber-300 border-zinc-750 hover:border-amber-400'
+                              }`}
+                              title="Kart nömrəsini birbaşa kopyalamaq üçün klikləyin"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>{w.cardNumber}</span>
+                              {isCopied && <span className="text-[10px] font-black uppercase ml-1">✓ Kopyalandı!</span>}
+                            </button>
+                          </div>
                         </div>
-                      )}
-                    </div>
-                  ))}
+
+                        {w.status === 'pending' && (
+                          <div className="flex items-center space-x-2 self-end sm:self-center shrink-0">
+                            <button
+                              onClick={() => handleApproveWithdrawal(w.id)}
+                              className="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black rounded-xl text-xs transition-all shadow-md shadow-emerald-500/20 flex items-center space-x-1 cursor-pointer active:scale-95"
+                            >
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
+                              <span>Ödəndi / Təsdiqlə</span>
+                            </button>
+                            <button
+                              onClick={() => handleRejectWithdrawal(w.id)}
+                              className="px-3 py-2 bg-red-950 hover:bg-red-900 border border-red-800 text-red-300 font-bold rounded-xl text-xs transition-colors cursor-pointer active:scale-95"
+                            >
+                              İmtina
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1389,18 +2394,49 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                         </div>
 
                         {activePlayer && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingPlayer(activePlayer);
-                              setBalanceDelta('');
-                              setBalanceMode('add');
-                            }}
-                            className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 border border-amber-500/40 rounded-xl text-xs font-black transition-all flex items-center space-x-1.5 cursor-pointer shadow-sm"
-                          >
-                            <DollarSign className="w-3.5 h-3.5" />
-                            <span>Balans Dəyiş</span>
-                          </button>
+                          <div className="flex items-center space-x-1.5 flex-wrap">
+                            {/* Instant Gift Action Presets directly in Chat */}
+                            <div className="flex items-center space-x-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
+                              <span className="text-[10px] text-zinc-500 font-bold px-1 uppercase">Hədiyyə:</span>
+                              <button
+                                type="button"
+                                onClick={() => handleDirectChatGift(5, 'bonus')}
+                                className="px-2 py-1 bg-purple-950/70 hover:bg-purple-600 text-purple-300 hover:text-white border border-purple-700/60 rounded-lg text-[10.5px] font-bold transition-all cursor-pointer"
+                                title="+$5 Hədiyyə Bonusu ver və bildiriş göndər"
+                              >
+                                🎁 +$5 Bonus
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDirectChatGift(10, 'bonus')}
+                                className="px-2 py-1 bg-purple-950/70 hover:bg-purple-600 text-purple-300 hover:text-white border border-purple-700/60 rounded-lg text-[10.5px] font-bold transition-all cursor-pointer"
+                                title="+$10 Hədiyyə Bonusu ver və bildiriş göndər"
+                              >
+                                🎁 +$10 Bonus
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDirectChatGift(25, 'real')}
+                                className="px-2 py-1 bg-emerald-950/70 hover:bg-emerald-600 text-emerald-300 hover:text-zinc-950 border border-emerald-700/60 rounded-lg text-[10.5px] font-bold transition-all cursor-pointer"
+                                title="+$25 Real Balans ver və bildiriş göndər"
+                              >
+                                💵 +$25 Real
+                              </button>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingPlayer(activePlayer);
+                                setBalanceDelta('');
+                                setBalanceMode('add');
+                              }}
+                              className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 border border-amber-500/40 rounded-xl text-xs font-black transition-all flex items-center space-x-1.5 cursor-pointer shadow-sm"
+                            >
+                              <DollarSign className="w-3.5 h-3.5" />
+                              <span>Balans Dəyiş</span>
+                            </button>
+                          </div>
                         )}
                       </div>
 
@@ -1774,120 +2810,206 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             </div>
           )}
 
-          {/* TAB 6: SYSTEM BANK CARD & CASHIER SETTINGS */}
+          {/* TAB 6: SYSTEM BANK CARD & CASHIER SETTINGS & BROADCAST */}
           {activeTab === 'settings' && (
-            <form onSubmit={handleSaveSystemConfig} className="space-y-4 max-w-2xl bg-zinc-900/70 p-5 rounded-2xl border border-zinc-800">
-              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
-                <div>
-                  <h3 className="text-sm font-bold text-white">Rəsmi Bank Kartı və Depozit Ayarları</h3>
-                  <p className="text-xs text-zinc-400">
-                    Oyunçular "Depozit" etdikdə ekranda görünən rəsmi kart və limitlər
-                  </p>
-                </div>
-                {configSavedToast && (
-                  <span className="text-xs text-emerald-400 font-bold flex items-center space-x-1">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Yadda saxlanıldı</span>
-                  </span>
-                )}
-              </div>
-
-              <div className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-zinc-300 font-bold mb-1">Rəsmi Bank Kart Nömrəsi (Depozit üçün)</label>
-                  <input
-                    type="text"
-                    value={systemConfig.officialCardNumber}
-                    onChange={(e) => setSystemConfig({ ...systemConfig, officialCardNumber: e.target.value })}
-                    placeholder="5411 2498 1229 0497"
-                    className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2.5 text-amber-300 font-mono text-sm focus:outline-none focus:border-amber-500 font-bold"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-6 max-w-3xl">
+              {/* Broadcast Live Announcement Section */}
+              <div className="bg-gradient-to-br from-amber-950/40 via-zinc-900 to-zinc-950 p-5 rounded-2xl border border-amber-500/40 shadow-xl space-y-3">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
+                    <Megaphone className="w-4 h-4 stroke-[2.5]" />
+                  </div>
                   <div>
-                    <label className="block text-zinc-300 font-bold mb-1">Kart Sahibi (Ad Soyad)</label>
+                    <h3 className="text-sm font-black text-white flex items-center space-x-2">
+                      <span>Canlı Sistem Elanı Yay (Bütün Masalara & Lobbiyə)</span>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9.5px] font-black uppercase">
+                        Real-time Broadcast
+                      </span>
+                    </h3>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      Buradan yazdığınız rəsmi elan bütün aktiv poker masalarında və ana səhifədə canlı ticker/banner kimi görünəcək.
+                    </p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleBroadcastAnnouncement} className="space-y-3 pt-2">
+                  <div className="flex items-center space-x-2">
                     <input
                       type="text"
-                      value={systemConfig.officialCardHolder}
-                      onChange={(e) => setSystemConfig({ ...systemConfig, officialCardHolder: e.target.value })}
-                      placeholder="ROYAL POKER OFFICIAL"
-                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-zinc-100 focus:outline-none focus:border-amber-500 font-semibold"
+                      value={broadcastInput}
+                      onChange={(e) => setBroadcastInput(e.target.value)}
+                      placeholder={systemConfig.systemAnnouncement || 'Məsələn: 🎉 Həftəsonu böyük turniri saat 20:00-da başlayır! Depozitlərinizə +20% bonus!'}
+                      className="flex-1 bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500 font-medium"
                     />
+                    <button
+                      type="submit"
+                      disabled={isBroadcasting || !broadcastInput.trim()}
+                      className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:opacity-50 text-zinc-950 font-black rounded-xl text-xs flex items-center space-x-1.5 transition-all shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 shrink-0"
+                    >
+                      <Radio className="w-3.5 h-3.5" />
+                      <span>{isBroadcasting ? 'Yayımlanır...' : '📢 Canlı Elan Yay'}</span>
+                    </button>
                   </div>
 
+                  {/* Quick Preset Announcement Chips */}
+                  <div className="flex items-center space-x-1.5 overflow-x-auto no-scrollbar pt-1">
+                    <span className="text-[10px] text-zinc-500 font-bold uppercase shrink-0">Hazır Elanlar:</span>
+                    {[
+                      '🎉 Xoş gəldin bonusları aktivdir! Qeydiyyatdan keçən hər kəsə pulsuz balans!',
+                      '⚡ Həftəsonu xüsusi Omaha və Texas Holdem turniri saat 21:00-da!',
+                      '💳 Depozitlər və çıxarışlar 24/7 rejimdə dərhal icra edilir!',
+                      '👑 VIP oyunçularımız üçün masalarda 0% masa komissiyası kampaniyası!'
+                    ].map((preset, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setBroadcastInput(preset)}
+                        className="px-2.5 py-1 rounded-lg bg-zinc-850 hover:bg-amber-500 hover:text-zinc-950 text-zinc-400 hover:text-zinc-950 text-[10.5px] font-medium border border-zinc-750 transition-all whitespace-nowrap cursor-pointer shrink-0"
+                      >
+                        {preset.slice(0, 32)}...
+                      </button>
+                    ))}
+                  </div>
+
+                  {systemConfig.systemAnnouncement && (
+                    <div className="p-2.5 bg-zinc-950/80 rounded-xl border border-amber-500/30 flex items-center justify-between text-xs text-amber-300">
+                      <div className="flex items-center space-x-2 truncate">
+                        <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
+                        <span className="font-bold shrink-0">Aktiv Elan:</span>
+                        <span className="truncate text-zinc-200">{systemConfig.systemAnnouncement}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const updated = { ...systemConfig, systemAnnouncement: '' };
+                          setSystemConfig(updated);
+                          adminStorage.saveConfig(updated);
+                          await saveSystemConfigToFirestore(updated);
+                          showToast('🗑️ Aktiv canlı elan dayandırıldı.');
+                        }}
+                        className="text-[11px] text-red-400 hover:text-red-300 font-bold shrink-0 ml-2 cursor-pointer"
+                      >
+                        Ləğv Et
+                      </button>
+                    </div>
+                  )}
+                </form>
+              </div>
+
+              {/* Official Bank Card & Cashier Settings */}
+              <form onSubmit={handleSaveSystemConfig} className="space-y-4 bg-zinc-900/70 p-5 rounded-2xl border border-zinc-800 shadow-xl">
+                <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
                   <div>
-                    <label className="block text-zinc-300 font-bold mb-1">Bank Adı</label>
+                    <h3 className="text-sm font-bold text-white">Rəsmi Bank Kartı və Depozit Ayarları</h3>
+                    <p className="text-xs text-zinc-400">
+                      Oyunçular "Depozit" etdikdə ekranda görünən rəsmi kart və limitlər
+                    </p>
+                  </div>
+                  {configSavedToast && (
+                    <span className="text-xs text-emerald-400 font-bold flex items-center space-x-1">
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Yadda saxlanıldı</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="block text-zinc-300 font-bold mb-1">Rəsmi Bank Kart Nömrəsi (Depozit üçün)</label>
                     <input
                       type="text"
-                      value={systemConfig.officialBank}
-                      onChange={(e) => setSystemConfig({ ...systemConfig, officialBank: e.target.value })}
-                      placeholder="Kapital Bank / ABB / Visa Direct"
-                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-zinc-100 focus:outline-none focus:border-amber-500 font-semibold"
+                      value={systemConfig.officialCardNumber}
+                      onChange={(e) => setSystemConfig({ ...systemConfig, officialCardNumber: e.target.value })}
+                      placeholder="5411 2498 1229 0497"
+                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2.5 text-amber-300 font-mono text-sm focus:outline-none focus:border-amber-500 font-bold"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-zinc-300 font-bold mb-1">Kart Sahibi (Ad Soyad)</label>
+                      <input
+                        type="text"
+                        value={systemConfig.officialCardHolder}
+                        onChange={(e) => setSystemConfig({ ...systemConfig, officialCardHolder: e.target.value })}
+                        placeholder="ROYAL POKER OFFICIAL"
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-zinc-100 focus:outline-none focus:border-amber-500 font-semibold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-zinc-300 font-bold mb-1">Bank Adı</label>
+                      <input
+                        type="text"
+                        value={systemConfig.officialBank}
+                        onChange={(e) => setSystemConfig({ ...systemConfig, officialBank: e.target.value })}
+                        placeholder="Kapital Bank / ABB / Visa Direct"
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-2 text-zinc-100 focus:outline-none focus:border-amber-500 font-semibold"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
+                    <div>
+                      <label className="block text-zinc-400 mb-1">Min Depozit ($)</label>
+                      <input
+                        type="number"
+                        value={systemConfig.minDeposit}
+                        onChange={(e) => setSystemConfig({ ...systemConfig, minDeposit: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-400 mb-1">Maks Depozit ($)</label>
+                      <input
+                        type="number"
+                        value={systemConfig.maxDeposit}
+                        onChange={(e) => setSystemConfig({ ...systemConfig, maxDeposit: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-400 mb-1">Min Çıxarış ($)</label>
+                      <input
+                        type="number"
+                        value={systemConfig.minWithdraw}
+                        onChange={(e) => setSystemConfig({ ...systemConfig, minWithdraw: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-400 mb-1">Maks Çıxarış ($)</label>
+                      <input
+                        type="number"
+                        value={systemConfig.maxWithdraw}
+                        onChange={(e) => setSystemConfig({ ...systemConfig, maxWithdraw: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-2">
+                    <label className="block text-zinc-300 font-bold mb-1">Xoş Gəldin Qeydiyyat Bonusu ($)</label>
+                    <input
+                      type="number"
+                      value={systemConfig.welcomeBonusAmount}
+                      onChange={(e) => setSystemConfig({ ...systemConfig, welcomeBonusAmount: Number(e.target.value) })}
+                      className="w-48 bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-1.5 text-amber-400 font-mono font-bold"
                     />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
-                  <div>
-                    <label className="block text-zinc-400 mb-1">Min Depozit ($)</label>
-                    <input
-                      type="number"
-                      value={systemConfig.minDeposit}
-                      onChange={(e) => setSystemConfig({ ...systemConfig, minDeposit: Number(e.target.value) })}
-                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">Maks Depozit ($)</label>
-                    <input
-                      type="number"
-                      value={systemConfig.maxDeposit}
-                      onChange={(e) => setSystemConfig({ ...systemConfig, maxDeposit: Number(e.target.value) })}
-                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">Min Çıxarış ($)</label>
-                    <input
-                      type="number"
-                      value={systemConfig.minWithdraw}
-                      onChange={(e) => setSystemConfig({ ...systemConfig, minWithdraw: Number(e.target.value) })}
-                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-zinc-400 mb-1">Maks Çıxarış ($)</label>
-                    <input
-                      type="number"
-                      value={systemConfig.maxWithdraw}
-                      onChange={(e) => setSystemConfig({ ...systemConfig, maxWithdraw: Number(e.target.value) })}
-                      className="w-full bg-zinc-950 border border-zinc-700 rounded-xl px-2.5 py-1.5 text-zinc-100 font-mono font-bold"
-                    />
-                  </div>
+                <div className="pt-3 border-t border-zinc-800 flex justify-end">
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-black rounded-xl text-xs flex items-center space-x-2 shadow-lg shadow-amber-500/20 transition-all active:scale-95 cursor-pointer"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>Dəyişiklikləri Yadda Saxla</span>
+                  </button>
                 </div>
-
-                <div className="pt-2">
-                  <label className="block text-zinc-300 font-bold mb-1">Xoş Gəldin Qeydiyyat Bonusu ($)</label>
-                  <input
-                    type="number"
-                    value={systemConfig.welcomeBonusAmount}
-                    onChange={(e) => setSystemConfig({ ...systemConfig, welcomeBonusAmount: Number(e.target.value) })}
-                    className="w-48 bg-zinc-950 border border-zinc-700 rounded-xl px-3 py-1.5 text-amber-400 font-mono font-bold"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-zinc-800 flex justify-end">
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-black rounded-xl text-xs flex items-center space-x-2 shadow-lg shadow-amber-500/20 transition-all active:scale-95 cursor-pointer"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>Dəyişiklikləri Yadda Saxla</span>
-                </button>
-              </div>
-            </form>
+              </form>
+            </div>
           )}
 
           {/* TAB 7: BOT SETTINGS (AI OTAĞI) */}
@@ -1936,16 +3058,16 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
               {/* MASTER BOT TOGGLE: AKTİV ET / DEAKTİV ET */}
               <div className={`p-5 rounded-2xl border transition-all shadow-xl ${
-                botConfig.isBotsActive !== false
+                botConfig.isBotsActive === true
                   ? 'bg-gradient-to-r from-emerald-950/70 via-zinc-900 to-zinc-950 border-emerald-500/50 shadow-emerald-950/40'
                   : 'bg-gradient-to-r from-red-950/70 via-zinc-900 to-zinc-950 border-red-500/50 shadow-red-950/40'
               }`}>
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <div className="flex items-center space-x-2">
-                      <span className={`w-3 h-3 rounded-full ${botConfig.isBotsActive !== false ? 'bg-emerald-400 animate-ping' : 'bg-red-500'}`} />
+                      <span className={`w-3 h-3 rounded-full ${botConfig.isBotsActive === true ? 'bg-emerald-400 animate-ping' : 'bg-red-500'}`} />
                       <h4 className="text-base font-black text-white">
-                        Əsas Bot Vəziyyəti: {botConfig.isBotsActive !== false ? (
+                        Əsas Bot Vəziyyəti: {botConfig.isBotsActive === true ? (
                           <span className="text-emerald-400">AKTİV (Botlar Masalarda Oynayır)</span>
                         ) : (
                           <span className="text-red-400">DEAKTİV (Bütün Botlar Masalardan Ləğv Edilib)</span>
@@ -1953,9 +3075,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       </h4>
                     </div>
                     <p className="text-xs text-zinc-350">
-                      {botConfig.isBotsActive !== false 
+                      {botConfig.isBotsActive === true 
                         ? 'Botlar aktivdir və masalara daxil olaraq hərəkət edir, mühərrik fasiləsiz işləyir.'
-                        : 'Botlar tamamilə söndürülüb. Masalardakı bütün botlar ləğv edilir və yeniləri daxil olmur.'}
+                        : 'Botlar tamamilə söndürülüb. Masalardakı bütün botlar ləğv edilir və heç bir bot masaya daxil ola bilməz.'}
                     </p>
                   </div>
 
@@ -1964,7 +3086,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     <button
                       type="button"
                       onClick={async () => {
-                        const updated = { ...botConfig, isBotsActive: true };
+                        const updated = { ...botConfig, isBotsActive: true, autoJoinLeaveEnabled: true };
                         setBotConfig(updated);
                         await saveBotSystemConfigToFirestore(updated);
                         soundManager.playWinSound();
@@ -1972,35 +3094,35 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                         showToast('⚡ BOTLAR AKTİV EDİLDİ! Masalarda botlar hərəkətə başladı.');
                       }}
                       className={`flex-1 sm:flex-none px-5 py-3 rounded-xl font-black text-xs flex items-center justify-center space-x-2 transition-all cursor-pointer shadow-lg ${
-                        botConfig.isBotsActive !== false
+                        botConfig.isBotsActive === true
                           ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-zinc-950 ring-2 ring-emerald-300 shadow-emerald-500/30 scale-102'
                           : 'bg-zinc-900 hover:bg-emerald-950/50 text-emerald-400 border border-emerald-500/30 opacity-70 hover:opacity-100'
                       }`}
                     >
                       <Zap className="w-4 h-4 text-zinc-950" />
                       <span>BOTLARI AKTİV ET</span>
-                      {botConfig.isBotsActive !== false && <Check className="w-3.5 h-3.5 ml-1" />}
+                      {botConfig.isBotsActive === true && <Check className="w-3.5 h-3.5 ml-1" />}
                     </button>
 
                     {/* BOTLARI DEAKTİV ET DÜYMƏSİ */}
                     <button
                       type="button"
                       onClick={async () => {
-                        const updated = { ...botConfig, isBotsActive: false };
+                        const updated = { ...botConfig, isBotsActive: false, autoJoinLeaveEnabled: false };
                         setBotConfig(updated);
                         await saveBotSystemConfigToFirestore(updated);
                         soundManager.playFoldSound();
                         showToast('⛔ BOTLAR DEAKTİV EDİLDİ! Bütün botlar masalardan ləğv edildi.');
                       }}
                       className={`flex-1 sm:flex-none px-5 py-3 rounded-xl font-black text-xs flex items-center justify-center space-x-2 transition-all cursor-pointer shadow-lg ${
-                        botConfig.isBotsActive === false
+                        botConfig.isBotsActive !== true
                           ? 'bg-gradient-to-r from-red-600 to-rose-600 text-white ring-2 ring-red-400 shadow-red-500/30 scale-102'
                           : 'bg-zinc-900 hover:bg-red-950/50 text-red-400 border border-red-500/30 opacity-70 hover:opacity-100'
                       }`}
                     >
                       <LogOut className="w-4 h-4" />
                       <span>BOTLARI DEAKTİV ET</span>
-                      {botConfig.isBotsActive === false && <Check className="w-3.5 h-3.5 ml-1" />}
+                      {botConfig.isBotsActive !== true && <Check className="w-3.5 h-3.5 ml-1" />}
                     </button>
                   </div>
                 </div>
@@ -2477,7 +3599,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
 
                 <div className="flex items-center space-x-2">
-                  {/* Zoom Controls */}
+                  {/* Zoom & Rotation Controls */}
                   <div className="flex items-center space-x-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
                     <button
                       type="button"
@@ -2500,17 +3622,25 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setReceiptZoom(1)}
-                      className="p-1 text-zinc-400 hover:text-white rounded hover:bg-zinc-800 cursor-pointer"
-                      title="Reset Zoom"
+                      onClick={() => setReceiptRotation(prev => (prev + 90) % 360)}
+                      className="p-1 text-zinc-400 hover:text-amber-400 rounded hover:bg-zinc-800 cursor-pointer"
+                      title="Fırlat (90°)"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setReceiptZoom(1); setReceiptRotation(0); }}
+                      className="px-1.5 py-0.5 text-[10px] text-zinc-400 hover:text-white rounded hover:bg-zinc-800 cursor-pointer font-mono"
+                      title="Sıfırla"
+                    >
+                      100%
                     </button>
                   </div>
 
                   <button
                     type="button"
-                    onClick={() => { setInspectingDeposit(null); setReceiptZoom(1); }}
+                    onClick={() => { setInspectingDeposit(null); setReceiptZoom(1); setReceiptRotation(0); }}
                     className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white cursor-pointer transition-colors"
                   >
                     <X className="w-5 h-5" />
@@ -2523,7 +3653,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 {/* Left: High Resolution Image Viewer */}
                 <div className="flex-1 bg-zinc-950/80 p-4 flex items-center justify-center overflow-auto border-b md:border-b-0 md:border-r border-zinc-800 relative">
                   {inspectingDeposit.receiptPreviewUrl ? (
-                    <div className="max-w-full max-h-full flex items-center justify-center transition-transform duration-200" style={{ transform: `scale(${receiptZoom})` }}>
+                    <div className="max-w-full max-h-full flex items-center justify-center transition-transform duration-200" style={{ transform: `scale(${receiptZoom}) rotate(${receiptRotation}deg)` }}>
                       <img
                         src={inspectingDeposit.receiptPreviewUrl}
                         alt="HD Receipt Preview"

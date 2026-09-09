@@ -13,6 +13,10 @@ interface ActionControlsProps {
   lang: Language;
   preAction: 'check_fold' | 'check' | 'call_any' | null;
   onSetPreAction: (action: 'check_fold' | 'check' | 'call_any' | null) => void;
+  sitOutNextHand?: boolean;
+  onToggleSitOutNextHand?: (val: boolean) => void;
+  turnTimeLeft?: number;
+  maxTimeBank?: number;
 }
 
 export const ActionControls: React.FC<ActionControlsProps> = ({
@@ -23,6 +27,10 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
   lang,
   preAction,
   onSetPreAction,
+  sitOutNextHand = false,
+  onToggleSitOutNextHand,
+  turnTimeLeft = 15,
+  maxTimeBank = 15,
 }) => {
   const t = translations[lang];
 
@@ -175,6 +183,28 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
             </div>
             <span>{t.pre_call_any}</span>
           </button>
+
+          {/* Sit Out Next Hand Toggle */}
+          {onToggleSitOutNextHand && (
+            <button
+              type="button"
+              onClick={() => {
+                soundManager.playButtonClick();
+                onToggleSitOutNextHand(!sitOutNextHand);
+              }}
+              id="pre_action_sit_out_next"
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all flex items-center space-x-1 ${
+                sitOutNextHand
+                  ? 'bg-red-500/20 border-red-400 text-red-300 shadow-sm shadow-red-500/20'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+              }`}
+            >
+              <div className={`w-3 h-3 rounded border flex items-center justify-center ${sitOutNextHand ? 'bg-red-400 border-red-400 text-zinc-950' : 'border-zinc-600'}`}>
+                {sitOutNextHand && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+              </div>
+              <span className="whitespace-nowrap">{t.sit_out_next_hand}</span>
+            </button>
+          )}
         </div>
       </div>
     );
@@ -187,6 +217,40 @@ export const ActionControls: React.FC<ActionControlsProps> = ({
       animate={{ opacity: 1, y: 0 }}
       className="bg-zinc-950/95 border border-amber-400/70 backdrop-blur-md rounded-xl p-2 sm:p-2.5 shadow-xl shadow-amber-500/10 max-w-xl mx-auto space-y-2 z-30"
     >
+      {/* Live Turn Timer Header Bar with smooth countdown */}
+      <div className="flex items-center justify-between px-1 pb-1 border-b border-zinc-800/80 text-xs">
+        <div className="flex items-center space-x-1.5">
+          <span className={`w-2 h-2 rounded-full animate-ping ${turnTimeLeft <= 5 ? 'bg-red-500' : 'bg-amber-400'}`} />
+          <span className="font-black text-amber-400 text-[11px] tracking-wide uppercase">
+            {lang === 'az' ? 'SİZİN NÖVBƏNİZ' : 'YOUR TURN'}
+          </span>
+        </div>
+        <div className="flex items-center space-x-2">
+          {/* Progress Bar */}
+          <div className="w-24 sm:w-36 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div
+              className={`h-full transition-all duration-1000 rounded-full ${
+                turnTimeLeft <= 5
+                  ? 'bg-gradient-to-r from-red-600 to-rose-400 animate-pulse'
+                  : turnTimeLeft <= 10
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-400'
+                  : 'bg-gradient-to-r from-emerald-500 to-teal-400'
+              }`}
+              style={{ width: `${Math.min(100, Math.max(0, (turnTimeLeft / (maxTimeBank || 15)) * 100))}%` }}
+            />
+          </div>
+          <span
+            className={`font-mono font-black text-xs px-1.5 py-0.2 rounded ${
+              turnTimeLeft <= 5
+                ? 'bg-red-600/30 text-red-400 border border-red-500/60 animate-bounce'
+                : 'bg-zinc-900 text-amber-300 border border-zinc-700'
+            }`}
+          >
+            {turnTimeLeft}s
+          </span>
+        </div>
+      </div>
+
       {/* Bet Sizing Slider & Quick Sizes (only if player can bet or raise) */}
       {player.chips > toCall && (
         <div className="space-y-1.5 pb-1.5 border-b border-zinc-800/80">

@@ -30,7 +30,7 @@ export const PlayingCard: React.FC<PlayingCardProps> = ({
     lg: 'w-16 h-22 sm:w-20 sm:h-28 text-base rounded-lg',
   }[size];
 
-  if (hidden || !card) {
+  if (hidden || !card || card.rank === 'hidden' as any) {
     return (
       <motion.div
         initial={{ opacity: 0, scale: 0.8, y: -20, rotate: -5 }}

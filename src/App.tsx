@@ -38,8 +38,20 @@ import {
   subscribeToRealtimeAdminData,
   subscribeToUserProfile,
   subscribeToPlayerSupportMessages,
+  subscribeToAllLiveTables,
+  saveTableToFirestore,
+  deleteTableFromFirestore,
+  updateTableBlindsInFirestore,
+  kickPlayerFromTableInFirestore,
+  leaveTableSeatInFirestore,
   SupportMessage
 } from './services/firebase';
+import { 
+  emitKickPlayerSocket, 
+  emitPlayerLeaveSocket,
+  emitCloseTableSocket, 
+  emitUpdateTableLimitsSocket 
+} from './services/socket';
 import { GOLDEN_ACE_AVATAR } from './types/poker';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 
@@ -113,6 +125,38 @@ export default function App() {
   const [activeTable, setActiveTable] = useState<PokerTableState | null>(null);
   const [currentView, setCurrentView] = useState<'lobby' | 'table'>('lobby');
 
+  // Real-time synchronization of all tables across all players in the system
+  useEffect(() => {
+    const initial = generateInitialTables();
+    const unsubscribe = subscribeToAllLiveTables((remoteTables) => {
+      if (remoteTables && remoteTables.length > 0) {
+        setTables(remoteTables);
+        setActiveTable((prevActive) => {
+          if (!prevActive) return null;
+          const matched = remoteTables.find((t) => t.id === prevActive.id);
+          return matched ? { ...matched, feltColor: prevActive.feltColor || matched.feltColor } : prevActive;
+        });
+      }
+    }, initial);
+
+    return () => unsubscribe();
+  }, []);
+
+  // Direct Room / Table ID Deep-Linking & Refresh Session Restore (?table=ID or localStorage)
+  useEffect(() => {
+    if (tables.length === 0 || !user) return;
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const targetTableId = urlParams.get('table') || urlParams.get('room') || localStorage.getItem('poker_active_table_id');
+      if (targetTableId && !activeTable) {
+        const found = tables.find((t) => t.id === targetTableId);
+        if (found) {
+          handleJoinTable(found, true);
+        }
+      }
+    } catch {}
+  }, [tables, activeTable, user]);
+
   // Modals
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'admin'>('signin');
@@ -130,6 +174,23 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [volume, setVolume] = useState<number>(0.6);
   const [autoMuck, setAutoMuck] = useState<boolean>(true);
+  const [autoRebuy, setAutoRebuy] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('poker_auto_rebuy');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const handleToggleAutoRebuy = (val: boolean) => {
+    setAutoRebuy(val);
+    try {
+      localStorage.setItem('poker_auto_rebuy', String(val));
+    } catch {
+      // ignore
+    }
+  };
   const [globalDepositToast, setGlobalDepositToast] = useState<string | null>(null);
   const [playerAdminMessageToast, setPlayerAdminMessageToast] = useState<SupportMessage | null>(null);
   const [unreadSupportCount, setUnreadSupportCount] = useState<number>(0);
@@ -246,17 +307,22 @@ export default function App() {
     return () => unsubscribe();
   }, [user?.id, user?.isAdmin]);
 
-  // Real-time synchronization of player's balance when Admin approves a deposit or updates balance
+  // Real-time synchronization of player's balance from Firestore
   useEffect(() => {
     if (!user?.id || user?.isAdmin) return;
 
     const currentId = user.id;
-    let initialBalance = user.realBalance;
+    const initialMountTime = Date.now();
 
     const unsubscribe = subscribeToUserProfile(currentId, (liveUser) => {
       if (liveUser && liveUser.realBalance !== undefined) {
-        if (liveUser.realBalance > initialBalance) {
-          const credited = (liveUser.realBalance - initialBalance).toFixed(2);
+        // Only trigger deposit celebration if an actual admin approval timestamp was recorded after mount
+        if (
+          liveUser.lastDepositApprovedAt && 
+          liveUser.lastDepositApprovedAt > initialMountTime && 
+          liveUser.lastDepositApprovedAmount
+        ) {
+          const credited = liveUser.lastDepositApprovedAmount.toFixed(2);
           soundManager.playWinSound();
           confetti({ particleCount: 100, spread: 85, origin: { y: 0.4 } });
           setGlobalDepositToast(
@@ -266,7 +332,7 @@ export default function App() {
           );
           setTimeout(() => setGlobalDepositToast(null), 8000);
         }
-        initialBalance = liveUser.realBalance;
+
         setUser((prev) => {
           if (!prev || prev.id !== currentId) return prev;
           return {
@@ -274,6 +340,7 @@ export default function App() {
             realBalance: liveUser.realBalance,
             bonusBalance: liveUser.bonusBalance !== undefined ? liveUser.bonusBalance : prev.bonusBalance,
             isBanned: liveUser.isBanned !== undefined ? liveUser.isBanned : prev.isBanned,
+            lastDepositApprovedAt: liveUser.lastDepositApprovedAt ?? prev.lastDepositApprovedAt,
           };
         });
       }
@@ -377,12 +444,54 @@ export default function App() {
 
     setActiveTable(clonedTable);
     setCurrentView('table');
+    try {
+      localStorage.setItem('poker_active_table_id', clonedTable.id);
+      window.history.replaceState(null, '', `?table=${clonedTable.id}`);
+    } catch {}
   };
 
   // Leave Table handler
   const handleLeaveTable = () => {
+    try {
+      localStorage.removeItem('poker_active_table_id');
+    } catch {}
+    if (activeTable && user) {
+      const tableId = activeTable.id;
+      const userId = user.id;
+
+      // 1. Broadcast instant WebSocket player leave event to immediately free seat across all connected clients
+      emitPlayerLeaveSocket(tableId, userId);
+
+      // 2. Explicitly set seat index to null in Firestore database document for that table
+      leaveTableSeatInFirestore(tableId, -1, userId, activeTable).catch((err) => {
+        console.warn('Error syncing leave table seat to Firestore:', err);
+      });
+
+      // 3. Immediately update local tables state so UI reflects empty seat with zero latency
+      setTables((prev) =>
+        prev.map((t) => {
+          if (t.id === tableId) {
+            const players = (t.players || []).map((p) => (p && p.id === userId ? null : p));
+            const remainingCount = players.filter((p) => p !== null).length;
+            return {
+              ...t,
+              players,
+              stage: (remainingCount < 2 ? 'waiting' : t.stage) as any,
+              pot: remainingCount < 2 ? 0 : t.pot,
+              communityCards: remainingCount < 2 ? [] : t.communityCards,
+              handWinners: remainingCount < 2 ? [] : t.handWinners,
+              updatedAt: Date.now(),
+            };
+          }
+          return t;
+        })
+      );
+    }
     setActiveTable(null);
     setCurrentView('lobby');
+    try {
+      window.history.replaceState(null, '', window.location.pathname);
+    } catch {}
   };
 
   // Logout handler: Clears user and returns to Login / Registration modal
@@ -402,8 +511,8 @@ export default function App() {
     setIsAuthOpen(true);
   };
 
-  // Create Private Table Handler
-  const handleCreateCustomTable = (data: {
+  // Create Private / Custom Table Handler (Real-Time Synchronized to all players)
+  const handleCreateCustomTable = async (data: {
     name: string;
     gameType: GameType;
     capacity: TableCapacity;
@@ -417,7 +526,7 @@ export default function App() {
     stakesTier: StakesTier;
   }) => {
     const newTbl = createPopulatedTable({
-      id: `tbl_custom_${Date.now()}`,
+      id: `tbl_custom_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       name: data.name,
       gameType: data.gameType,
       limitType: 'no_limit',
@@ -430,10 +539,13 @@ export default function App() {
       avgPot: data.bigBlind * 30,
       handsPerHour: 80,
       isCustomCreated: true,
+      createdById: user?.id,
     });
 
-    setTables([newTbl, ...tables]);
-    handleJoinTable(newTbl, true);
+    setTables((prev) => [newTbl, ...prev.filter((t) => t.id !== newTbl.id)]);
+    // Save to Firestore so every online user sees this new table appear immediately!
+    await saveTableToFirestore(newTbl);
+    handleJoinTable(newTbl, false);
   };
 
   return (
@@ -504,6 +616,7 @@ export default function App() {
             isFourColor={isFourColor}
             feltColor={feltColor}
             autoMuck={autoMuck}
+            autoRebuy={autoRebuy}
           />
         )}
       </main>
@@ -688,6 +801,8 @@ export default function App() {
         onVolumeChange={setVolume}
         autoMuck={autoMuck}
         onToggleAutoMuck={setAutoMuck}
+        autoRebuy={autoRebuy}
+        onToggleAutoRebuy={handleToggleAutoRebuy}
         onOpenSupport={() => setIsSupportOpen(true)}
       />
 
@@ -732,6 +847,116 @@ export default function App() {
           onClose={() => setIsAdminPanelOpen(false)}
           lang={lang}
           currentUser={user}
+          tables={tables}
+          onKickPlayer={async (tableId, playerId) => {
+            emitKickPlayerSocket(tableId, playerId);
+            await kickPlayerFromTableInFirestore(tableId, playerId);
+            setTables((prev) =>
+              prev.map((t) => {
+                if (t.id === tableId) {
+                  const updatedPlayers = (t.players || []).map((p) => (p && p.id === playerId ? null : p));
+                  return { ...t, players: updatedPlayers };
+                }
+                return t;
+              })
+            );
+            if (activeTable && activeTable.id === tableId) {
+              const updatedPlayers = (activeTable.players || []).map((p) => (p && p.id === playerId ? null : p));
+              setActiveTable({ ...activeTable, players: updatedPlayers });
+            }
+          }}
+          onAddBotToTable={async (tableId) => {
+            setTables((prev) => {
+              const target = prev.find((t) => t.id === tableId);
+              if (!target) return prev;
+              const currentPlayers = target.players || [];
+              const emptyIdx = currentPlayers.findIndex((p) => p === null);
+              if (emptyIdx === -1) return prev;
+
+              const bot = createBotPlayer(
+                emptyIdx,
+                target.id,
+                target.bigBlind,
+                target.gameType || 'texas',
+                undefined,
+                undefined,
+                currentPlayers
+              );
+              const updatedPlayers = [...currentPlayers];
+              updatedPlayers[emptyIdx] = bot;
+              const updatedTable = { ...target, players: updatedPlayers };
+              saveTableToFirestore(updatedTable);
+              if (activeTable && activeTable.id === tableId) {
+                setActiveTable(updatedTable);
+              }
+              return prev.map((t) => (t.id === tableId ? updatedTable : t));
+            });
+          }}
+          onRemoveBotFromTable={async (tableId, botId) => {
+            setTables((prev) => {
+              const target = prev.find((t) => t.id === tableId);
+              if (!target) return prev;
+              const currentPlayers = target.players || [];
+              let removeIdx = -1;
+              if (botId) {
+                removeIdx = currentPlayers.findIndex((p) => p && p.id === botId && !p.isHuman);
+              } else {
+                removeIdx = currentPlayers.findIndex((p) => p && !p.isHuman);
+              }
+              if (removeIdx === -1) return prev;
+
+              const updatedPlayers = [...currentPlayers];
+              updatedPlayers[removeIdx] = null;
+              const updatedTable = { ...target, players: updatedPlayers };
+              saveTableToFirestore(updatedTable);
+              if (activeTable && activeTable.id === tableId) {
+                setActiveTable(updatedTable);
+              }
+              return prev.map((t) => (t.id === tableId ? updatedTable : t));
+            });
+          }}
+          onCloseTable={async (tableId) => {
+            emitCloseTableSocket(tableId);
+            await deleteTableFromFirestore(tableId);
+            setTables((prev) => prev.filter((t) => t.id !== tableId));
+            if (activeTable && activeTable.id === tableId) {
+              setActiveTable(null);
+              setCurrentView('lobby');
+            }
+          }}
+          onUpdateTableLimits={async (tableId, smallBlind, bigBlind) => {
+            emitUpdateTableLimitsSocket(tableId, smallBlind, bigBlind);
+            await updateTableBlindsInFirestore(tableId, smallBlind, bigBlind);
+            setTables((prev) =>
+              prev.map((t) =>
+                t.id === tableId
+                  ? {
+                      ...t,
+                      smallBlind,
+                      bigBlind,
+                      minBuyIn: smallBlind * 40,
+                      maxBuyIn: bigBlind * 100,
+                    }
+                  : t
+              )
+            );
+            if (activeTable && activeTable.id === tableId) {
+              setActiveTable({
+                ...activeTable,
+                smallBlind,
+                bigBlind,
+                minBuyIn: smallBlind * 40,
+                maxBuyIn: bigBlind * 100,
+              });
+            }
+          }}
+          onOpenNewTableModal={() => {
+            setIsAdminPanelOpen(false);
+            setIsCreateTableOpen(true);
+          }}
+          onSpectateTable={(table) => {
+            handleJoinTable(table, true);
+          }}
           onRefreshUserData={() => {
             if (user) {
               const latest = adminStorage.getRegisteredPlayers().find(p => p.id === user.id);

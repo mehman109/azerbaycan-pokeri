@@ -1,4 +1,4 @@
-import { db } from '../services/firebase';
+import { db, getFirestoreQuotaExceeded, isQuotaExceededError, setFirestoreQuotaExceeded } from '../services/firebase';
 import { 
   collection, 
   addDoc, 
@@ -6,9 +6,9 @@ import {
   query, 
   where, 
   serverTimestamp,
-  doc,
-  updateDoc,
-  getDoc
+  doc, 
+  updateDoc, 
+  getDoc 
 } from 'firebase/firestore';
 
 export interface ReceiptVerificationResult {
@@ -105,35 +105,39 @@ export async function verifyDepositReceipt(
   // 3. Duplicate Receipt Check via Firebase & Local Storage
   const receiptHash = await generateFileHash(file);
 
-  try {
-    // Check in Firestore receipts collection
-    const receiptsRef = collection(db, 'verified_receipts');
-    const q = query(receiptsRef, where('hash', '==', receiptHash));
-    const snap = await getDocs(q);
+  if (!getFirestoreQuotaExceeded()) {
+    try {
+      // Check in Firestore receipts collection
+      const receiptsRef = collection(db, 'verified_receipts');
+      const q = query(receiptsRef, where('hash', '==', receiptHash));
+      const snap = await getDocs(q);
 
-    if (!snap.empty) {
-      const existingDoc = snap.docs[0].data();
-      return {
-        isValid: false,
-        errorCode: 'DUPLICATE_RECEIPT',
-        errorMessage: `TƏHLÜKƏ: Bu bank çeki artıq ${new Date(existingDoc.usedAt || Date.now()).toLocaleDateString('az-AZ')} tarixində istifadə olunub! Eyni çeki təkrar istifadə etmək qadağandır.`,
-        receiptHash,
-        detectedTimestamp: fileLastModified
-      };
+      if (!snap.empty) {
+        const existingDoc = snap.docs[0].data();
+        return {
+          isValid: false,
+          errorCode: 'DUPLICATE_RECEIPT',
+          errorMessage: `TƏHLÜKƏ: Bu bank çeki artıq ${new Date(existingDoc.usedAt || Date.now()).toLocaleDateString('az-AZ')} tarixində istifadə olunub! Eyni çeki təkrar istifadə etmək qadağandır.`,
+          receiptHash,
+          detectedTimestamp: fileLastModified
+        };
+      }
+    } catch (err: any) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true);
+      console.warn('Firestore receipt check offline fallback:', err?.message || err);
     }
-  } catch (err) {
-    console.warn('Firestore receipt check offline fallback:', err);
-    // Local fallback check
-    const usedHashes = JSON.parse(localStorage.getItem('royal_poker_used_receipt_hashes') || '[]');
-    if (usedHashes.includes(receiptHash)) {
-      return {
-        isValid: false,
-        errorCode: 'DUPLICATE_RECEIPT',
-        errorMessage: 'TƏHLÜKƏ: Bu bank çeki artıq əvvəllər istifadə edilib! Təkrar çek yükləmək qadağandır.',
-        receiptHash,
-        detectedTimestamp: fileLastModified
-      };
-    }
+  }
+
+  // Local fallback check
+  const usedHashes = JSON.parse(localStorage.getItem('royal_poker_used_receipt_hashes') || '[]');
+  if (usedHashes.includes(receiptHash)) {
+    return {
+      isValid: false,
+      errorCode: 'DUPLICATE_RECEIPT',
+      errorMessage: 'TƏHLÜKƏ: Bu bank çeki artıq əvvəllər istifadə edilib! Təkrar çek yükləmək qadağandır.',
+      receiptHash,
+      detectedTimestamp: fileLastModified
+    };
   }
 
   // Passed all anti-fraud checks!
@@ -153,34 +157,37 @@ export async function markReceiptAsUsed(
   amount: number,
   currency: string
 ) {
-  try {
-    // Save to Firestore
-    const receiptsRef = collection(db, 'verified_receipts');
-    await addDoc(receiptsRef, {
-      hash: receiptHash,
-      userId,
-      username,
-      amount,
-      currency,
-      usedAt: Date.now(),
-      status: 'used'
-    });
+  if (!getFirestoreQuotaExceeded()) {
+    try {
+      // Save to Firestore
+      const receiptsRef = collection(db, 'verified_receipts');
+      await addDoc(receiptsRef, {
+        hash: receiptHash,
+        userId,
+        username,
+        amount,
+        currency,
+        usedAt: Date.now(),
+        status: 'used'
+      });
 
-    // Also log in transactions collection
-    const txRef = collection(db, 'transactions');
-    await addDoc(txRef, {
-      userId,
-      username,
-      type: 'deposit',
-      amount,
-      currency,
-      status: 'completed',
-      receiptHash,
-      timestamp: Date.now(),
-      paymentMethod: 'Bank Kartı (Dəqiq Çek Yoxlanışı ilə)'
-    });
-  } catch (err) {
-    console.warn('Could not write receipt hash to Firestore:', err);
+      // Also log in transactions collection
+      const txRef = collection(db, 'transactions');
+      await addDoc(txRef, {
+        userId,
+        username,
+        type: 'deposit',
+        amount,
+        currency,
+        status: 'completed',
+        receiptHash,
+        timestamp: Date.now(),
+        paymentMethod: 'Bank Kartı (Dəqiq Çek Yoxlanışı ilə)'
+      });
+    } catch (err: any) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true);
+      console.warn('Could not write receipt hash to Firestore:', err?.message || err);
+    }
   }
 
   // Local storage backup
@@ -203,18 +210,21 @@ export async function logFraudAttempt(
   amount: number,
   receiptHash: string
 ) {
-  try {
-    const fraudRef = collection(db, 'fraud_alerts');
-    await addDoc(fraudRef, {
-      userId,
-      username,
-      reason,
-      attemptedAmount: amount,
-      receiptHash,
-      timestamp: Date.now(),
-      resolved: false
-    });
-  } catch (err) {
-    console.warn('Could not log fraud alert to Firestore:', err);
+  if (!getFirestoreQuotaExceeded()) {
+    try {
+      const fraudRef = collection(db, 'fraud_alerts');
+      await addDoc(fraudRef, {
+        userId,
+        username,
+        reason,
+        attemptedAmount: amount,
+        receiptHash,
+        timestamp: Date.now(),
+        resolved: false
+      });
+    } catch (err: any) {
+      if (isQuotaExceededError(err)) setFirestoreQuotaExceeded(true);
+      console.warn('Could not log fraud alert to Firestore:', err?.message || err);
+    }
   }
 }

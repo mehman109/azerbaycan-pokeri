@@ -296,6 +296,7 @@ export function createPopulatedTable(def: {
   handsPerHour?: number;
   passcode?: string;
   isCustomCreated?: boolean;
+  createdById?: string;
 }): PokerTableState {
   const deck = createDeck(def.gameType);
   const players: (Player | null)[] = new Array(def.capacity).fill(null);
@@ -312,7 +313,7 @@ export function createPopulatedTable(def: {
     minBuyIn: def.bigBlind * 20,
     maxBuyIn: def.bigBlind * 100,
     capacity: def.capacity,
-    timeBank: 15,
+    timeBank: 30,
     isPrivate: Boolean(def.passcode),
     passcode: def.passcode,
     feltColor: def.feltColor,
@@ -333,5 +334,6 @@ export function createPopulatedTable(def: {
     avgPot: def.avgPot || def.bigBlind * 25,
     handsPerHour: def.handsPerHour || 75,
     isCustomCreated: Boolean(def.isCustomCreated),
+    createdById: def.createdById,
   };
 }

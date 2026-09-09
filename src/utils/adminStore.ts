@@ -41,6 +41,7 @@ export interface SystemConfig {
   welcomeBonusTurnoverTarget: number;
   depositDurationMinutes: number;
   isMaintenanceMode: boolean;
+  systemAnnouncement?: string;
 }
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -56,6 +57,7 @@ const DEFAULT_CONFIG: SystemConfig = {
   welcomeBonusTurnoverTarget: 100,
   depositDurationMinutes: 3,
   isMaintenanceMode: false,
+  systemAnnouncement: '',
 };
 
 const DEFAULT_PLAYERS: UserProfile[] = [];

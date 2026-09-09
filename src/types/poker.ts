@@ -11,7 +11,28 @@ export type GameType = 'texas_holdem' | 'omaha_plo' | 'short_deck' | 'mtt_tourna
 export type LimitType = 'no_limit' | 'pot_limit' | 'fixed_limit';
 export type StakesTier = 'micro' | 'low' | 'mid' | 'high';
 export type TableCapacity = 2 | 6 | 9;
-export type FeltColor = 'emerald' | 'sapphire' | 'crimson' | 'charcoal';
+export type FeltColor = 
+  | 'emerald' 
+  | 'sapphire' 
+  | 'crimson' 
+  | 'charcoal' 
+  | 'midnight_blue' 
+  | 'royal_velvet' 
+  | 'cyber_neon' 
+  | 'ruby_luxury' 
+  | 'diamond_prestige' 
+  | 'galactic_void' 
+  | 'golden_mirage';
+
+export type AvatarFrameId = 
+  | 'default' 
+  | 'silver_chrome' 
+  | 'gold_ace' 
+  | 'platinum_pulse' 
+  | 'ruby_dragon' 
+  | 'diamond_shimmer' 
+  | 'obsidian_galaxy' 
+  | 'crown_olympus';
 
 export type GameStage = 'waiting' | 'preflop' | 'flop' | 'turn' | 'river' | 'showdown' | 'hand_ended';
 
@@ -43,6 +64,7 @@ export interface Player {
   isFolded: boolean;
   isAllIn: boolean;
   isSittingOut: boolean;
+  consecutiveMissedTurns?: number;
   isDisconnected: boolean;
   isHuman: boolean;
   seatIndex: number;
@@ -58,6 +80,9 @@ export interface Player {
   winAmount?: number;
   timeRemaining?: number; // seconds
   vipLevel: number;
+  vipXp?: number;
+  avatarFrame?: AvatarFrameId;
+  selectedAvatarFrame?: AvatarFrameId;
   joinedAt?: number;
   sessionDurationMinutes?: number;
   willRebuyOnBust?: boolean;
@@ -111,6 +136,7 @@ export interface PokerTableState {
   handsPerHour: number;
   createdById?: string;
   isCustomCreated?: boolean;
+  updatedAt?: number;
 }
 
 export interface UserProfile {
@@ -128,13 +154,21 @@ export interface UserProfile {
   activeCurrencyMode: 'real' | 'play';
   vipLevel: number;
   vipXp: number;
+  selectedAvatarFrame?: AvatarFrameId;
+  selectedFeltColor?: FeltColor;
+  unlockedFrames?: AvatarFrameId[];
+  unlockedFeltColors?: FeltColor[];
   is2FAEnabled: boolean;
   isAdmin?: boolean;
   isBanned?: boolean;
   twoFactorSecret?: string;
+  lastDepositApprovedAt?: number;
+  lastDepositApprovedAmount?: number;
   totalHandsPlayed: number;
   handsWon: number;
   biggestPotWon: number;
+  isSittingOut?: boolean;
+  consecutiveMissedTurns?: number;
   createdAt: string;
 }
 
@@ -149,6 +183,76 @@ export interface WalletTransaction {
   status: 'completed' | 'pending' | 'failed';
   paymentMethod: string;
   txHash?: string;
+}
+
+export interface PlayerHandActionLog {
+  playerId: string;
+  playerName: string;
+  avatar?: string;
+  isHuman: boolean;
+  seatIndex: number;
+  isSmallBlind?: boolean;
+  isBigBlind?: boolean;
+  // Preflop metrics
+  vpip: boolean; // Voluntarily Put $ in Pot preflop
+  pfr: boolean;  // Pre-flop raise / bet
+  // Street Action Counts
+  flopBets: number;
+  flopRaises: number;
+  flopCalls: number;
+  flopChecks: number;
+  turnBets: number;
+  turnRaises: number;
+  turnCalls: number;
+  turnChecks: number;
+  riverBets: number;
+  riverRaises: number;
+  riverCalls: number;
+  riverChecks: number;
+  // Streets Reached
+  sawFlop: boolean;
+  sawTurn: boolean;
+  sawRiver: boolean;
+  sawShowdown: boolean;
+  // Financials & Result
+  invested: number;
+  wonAmount: number;
+  profit: number;
+  isWinner: boolean;
+  cards?: Card[];
+}
+
+export interface PlayerSessionStats {
+  playerId: string;
+  playerName: string;
+  avatar?: string;
+  isHuman: boolean;
+  totalHands: number;
+  vpipHands: number;
+  pfrHands: number;
+  vpipPercent: number;
+  pfrPercent: number;
+  totalPostflopBets: number;
+  totalPostflopRaises: number;
+  totalPostflopCalls: number;
+  totalPostflopChecks: number;
+  aggressionFactor: number;
+  isAfInfinite?: boolean;
+  aggressionFrequency: number;
+  sawFlopCount: number;
+  sawShowdownCount: number;
+  wtsdPercent: number;
+  handsWon: number;
+  winRatePercent: number;
+  netProfit: number;
+  playerStyle: 'TAG' | 'LAG' | 'NIT' | 'FISH' | 'MANIAC' | 'BALANCED';
+  styleLabel: string;
+  styleDescription: string;
+  streetBreakdown: {
+    flop: { bets: number; raises: number; calls: number; checks: number; af: number };
+    turn: { bets: number; raises: number; calls: number; checks: number; af: number };
+    river: { bets: number; raises: number; calls: number; checks: number; af: number };
+  };
 }
 
 export interface HandHistoryRecord {
@@ -171,6 +275,7 @@ export interface HandHistoryRecord {
   playerCards: Card[];
   playerProfit: number;
   timestamp: number;
+  playerActionLogs?: Record<string, PlayerHandActionLog>;
 }
 
 export interface TableRakeRecord {
@@ -190,9 +295,12 @@ export interface TableRakeRecord {
 
 export interface ChatMessage {
   id: string;
+  tableId?: string;
+  senderId?: string;
   senderName: string;
-  senderAvatar: string;
+  senderAvatar?: string;
   text: string;
+  message?: string;
   timestamp: number;
   isSystem?: boolean;
 }

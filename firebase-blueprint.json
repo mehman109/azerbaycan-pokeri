@@ -105,6 +105,24 @@
         "claimed": { "type": "boolean" }
       },
       "required": ["id", "tableId", "totalPot", "rakeAmount", "timestamp"]
+    },
+    "TableChatMessage": {
+      "title": "TableChatMessage",
+      "description": "Live in-game table chat message",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tableId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderAvatar": { "type": "string" },
+        "text": { "type": "string" },
+        "message": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "isSystem": { "type": "boolean" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "tableId", "senderId", "senderName", "text", "timestamp"]
     }
   },
   "firestore": {
@@ -139,6 +157,14 @@
     "/support_messages/{messageId}": {
       "schema": "SupportMessage",
       "description": "Live support chat messages"
+    },
+    "/table_chats/{chatId}": {
+      "schema": "TableChatMessage",
+      "description": "Live table chat messages for each poker table"
+    },
+    "/table_emojis/{emojiId}": {
+      "schema": "object",
+      "description": "Live floating emojis sent by players during poker game"
     },
     "/table_rakes/{rakeId}": {
       "schema": "TableRakeRecord",

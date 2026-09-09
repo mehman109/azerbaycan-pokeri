@@ -1,16 +1,18 @@
 import React from 'react';
-import { UserProfile, CurrencyType } from '../types/poker';
+import { UserProfile } from '../types/poker';
 import { translations, Language } from '../utils/translations';
 import { 
   Wallet, 
   Plus,
-  Coins,
   LogOut,
   ShieldCheck,
   Settings,
-  MessageSquare
+  MessageSquare,
+  Crown
 } from 'lucide-react';
 import { soundManager } from '../utils/audioEngine';
+import { AvatarWithFrame } from './AvatarWithFrame';
+import { calculateVipProgress } from '../utils/vipProgression';
 
 interface HeaderNavProps {
   user: UserProfile | null;
@@ -44,29 +46,13 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
 }) => {
   const t = translations[lang];
 
-  const getCurrencySymbol = (c?: CurrencyType) => {
-    switch (c) {
-      case 'USD': return '$';
-      case 'EUR': return '€';
-      case 'AZN': return '₼';
-      case 'USDT': return '₮';
-      default: return '$';
-    }
-  };
-
-  const activeBalance = user
-    ? user.activeCurrencyMode === 'real'
-      ? user.realBalance
-      : user.playMoneyBalance
-    : 10;
-
-  const currencySymbol = user && user.activeCurrencyMode === 'real' ? getCurrencySymbol(user.currency) : '$';
   const isAdmin = user && (user.isAdmin || user.username === 'ADMIN');
+  const vipState = user ? calculateVipProgress(user.vipXp || 0) : null;
 
   return (
     <header className="sticky top-0 z-40 w-full bg-zinc-950/95 border-b border-zinc-800/80 backdrop-blur-md px-2 sm:px-5 py-2 overflow-x-auto no-scrollbar scroll-smooth">
       <div className="flex items-center justify-between min-w-max w-full gap-2 sm:gap-4">
-        {/* Top Left: User Profile & Balance */}
+        {/* Top Left: User Profile (Avatar With Frame & VIP Badge) */}
         <div className="flex items-center space-x-2.5 shrink-0">
           {user ? (
             <div 
@@ -74,60 +60,47 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
                 if (isAdmin && onOpenAdminPanel) {
                   soundManager.playButtonClick();
                   onOpenAdminPanel();
+                } else if (onOpenSettings) {
+                  soundManager.playButtonClick();
+                  onOpenSettings();
                 }
               }}
-              className={`flex items-center space-x-2.5 ${isAdmin ? 'cursor-pointer group' : ''}`}
-              title={isAdmin ? 'İdarəetmə Panelini Aç' : ''}
+              className="flex items-center space-x-2.5 cursor-pointer group"
+              title={isAdmin ? 'İdarəetmə Panelini Aç' : 'VIP & Profil Ayarlarını Aç'}
             >
-              {/* User Avatar */}
-              <div className={`relative w-8 h-8 sm:w-9 sm:h-9 rounded-full ${
-                isAdmin
-                  ? 'ring-2 ring-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.8)] group-hover:scale-105 transition-transform'
-                  : 'ring-2 ring-amber-400 shadow-md'
-              } bg-zinc-900 overflow-hidden flex items-center justify-center shrink-0`}>
-                <img
-                  src={user.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&h=100&fit=crop&crop=faces'}
-                  alt={user.username}
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full object-cover"
-                />
-              </div>
+              {/* User Avatar with VIP Frame */}
+              <AvatarWithFrame
+                src={user.avatar}
+                alt={user.username}
+                size="sm"
+                frameId={user.selectedAvatarFrame || 'default'}
+                vipLevel={vipState?.currentLevel || 1}
+                className="group-hover:scale-105 transition-transform"
+              />
 
-              {/* Username & Balance */}
-              <div className="flex flex-col text-left leading-tight shrink-0">
-                <div className="flex items-center space-x-1">
+              {/* Username & VIP Level Pill */}
+              <div className="flex flex-col justify-center shrink-0">
+                <div className="flex items-center space-x-1.5">
                   {isAdmin ? (
-                    <span className="text-xs font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-yellow-200 to-amber-400 drop-shadow-[0_0_6px_rgba(245,158,11,0.6)] flex items-center space-x-0.5">
+                    <span className="text-xs sm:text-sm font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-yellow-200 to-amber-400 drop-shadow-[0_0_6px_rgba(245,158,11,0.6)] flex items-center space-x-1">
                       <span>👑</span>
                       <span>ADMIN</span>
                     </span>
                   ) : (
-                    <span className="text-xs font-bold text-white max-w-[120px] truncate">
+                    <span className="text-xs sm:text-sm font-bold text-white max-w-[140px] truncate">
                       {user.username}
                     </span>
                   )}
                 </div>
-                <div className="flex items-center space-x-1.5 mt-0.5">
-                  {isAdmin ? (
-                    <>
-                      <span className="text-xs sm:text-sm font-black text-amber-300 font-mono drop-shadow-[0_0_4px_rgba(245,158,11,0.5)]">
-                        ${user.realBalance.toFixed(2)}
-                      </span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber-400/30 text-amber-200 font-black border border-amber-400/50 uppercase">
-                        Admin
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="text-xs sm:text-sm font-black text-amber-400 font-mono">
-                        ${(user.bonusBalance ?? 0.00).toFixed(2)}
-                      </span>
-                      <span className="text-[9.5px] px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30 uppercase">
-                        Bonus
-                      </span>
-                    </>
-                  )}
-                </div>
+
+                {vipState && (
+                  <div className="flex items-center space-x-1 text-[10px] text-amber-400/90 font-bold leading-tight">
+                    <Crown className="w-2.5 h-2.5 text-amber-400" />
+                    <span>VIP {vipState.currentLevel}</span>
+                    <span className="text-zinc-500">•</span>
+                    <span className="text-zinc-400 font-mono text-[9px]">{vipState.totalXp} XP</span>
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -135,15 +108,9 @@ export const HeaderNav: React.FC<HeaderNavProps> = ({
               <div className="w-8 h-8 rounded-full ring-1 ring-zinc-700 bg-zinc-900 flex items-center justify-center text-zinc-400 text-xs font-bold">
                 👤
               </div>
-              <div className="flex flex-col text-left leading-tight">
-                <span className="text-xs font-bold text-zinc-300">Qonaq</span>
-                <div className="flex items-center space-x-1">
-                  <span className="text-xs font-black text-amber-400 font-mono">$0.00</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold uppercase">
-                    Bonus
-                  </span>
-                </div>
-              </div>
+              <span className="text-xs font-bold text-zinc-300">
+                {lang === 'az' ? 'Qonaq' : 'Guest'}
+              </span>
             </div>
           )}
         </div>

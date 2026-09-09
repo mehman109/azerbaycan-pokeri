@@ -52,6 +52,16 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Live Table Chat messages
+    match /table_chats/{chatId} {
+      allow read, write: if true;
+    }
+
+    // Live Table Emojis
+    match /table_emojis/{emojiId} {
+      allow read, write: if true;
+    }
+
     // 10% Table Rakes collection
     match /table_rakes/{rakeId} {
       allow read, write: if true;

@@ -22,13 +22,22 @@ import {
   Sparkles,
   Edit2,
   Save,
-  Trash2
+  Trash2,
+  Crown,
+  Lock,
+  Check,
+  Palette,
+  Zap,
+  Flame,
+  Diamond
 } from 'lucide-react';
-import { UserProfile, WalletTransaction, CurrencyType } from '../types/poker';
+import { UserProfile, WalletTransaction, CurrencyType, AvatarFrameId, FeltColor } from '../types/poker';
 import { translations, Language } from '../utils/translations';
 import { soundManager } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
 import { adminUpdateUserInFirestore, fetchAllDepositsFromFirestore, fetchAllWithdrawalsFromFirestore } from '../services/firebase';
+import { ALL_VIP_LEVELS, calculateVipProgress, getUnlockedFrames, getUnlockedFeltColors } from '../utils/vipProgression';
+import { AvatarWithFrame } from './AvatarWithFrame';
 
 interface UserSettingsModalProps {
   isOpen: boolean;
@@ -48,14 +57,19 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
   onLogout,
 }) => {
   const t = translations[lang];
-  const [activeTab, setActiveTab] = useState<'profile' | 'deposits' | 'withdrawals' | 'account'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'vip' | 'deposits' | 'withdrawals' | 'account'>('profile');
   
   // Profile edit states
   const [username, setUsername] = useState(user.username || '');
   const [avatarPreview, setAvatarPreview] = useState<string>(user.avatar || '');
+  const [selectedFrame, setSelectedFrame] = useState<AvatarFrameId>(user.selectedAvatarFrame || 'default');
+  const [selectedFelt, setSelectedFelt] = useState<FeltColor>(user.selectedFeltColor || 'emerald');
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // VIP Progress
+  const vipState = calculateVipProgress(user.vipXp || 0);
 
   // History state
   const [depositHistory, setDepositHistory] = useState<any[]>([]);
@@ -66,6 +80,8 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
     if (isOpen) {
       setUsername(user.username || '');
       setAvatarPreview(user.avatar || '');
+      setSelectedFrame(user.selectedAvatarFrame || 'default');
+      setSelectedFelt(user.selectedFeltColor || 'emerald');
       loadUserHistory();
     }
   }, [isOpen, user]);
@@ -117,6 +133,41 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
     reader.readAsDataURL(file);
   };
 
+  // Equip Frame Handler
+  const handleEquipFrame = async (frameId: AvatarFrameId) => {
+    setSelectedFrame(frameId);
+    soundManager.playWinSound();
+    confetti({ particleCount: 35, spread: 50, origin: { y: 0.7 } });
+
+    const updates: Partial<UserProfile> = {
+      selectedAvatarFrame: frameId
+    };
+
+    try {
+      await adminUpdateUserInFirestore(user.id, updates);
+      onUpdateUser(updates);
+    } catch (err) {
+      console.warn('Error saving frame selection:', err);
+    }
+  };
+
+  // Equip Felt Color Handler
+  const handleEquipFelt = async (feltId: FeltColor) => {
+    setSelectedFelt(feltId);
+    soundManager.playButtonClick();
+
+    const updates: Partial<UserProfile> = {
+      selectedFeltColor: feltId
+    };
+
+    try {
+      await adminUpdateUserInFirestore(user.id, updates);
+      onUpdateUser(updates);
+    } catch (err) {
+      console.warn('Error saving felt selection:', err);
+    }
+  };
+
   // Save profile changes
   const handleSaveProfile = async () => {
     if (!username.trim()) {
@@ -129,6 +180,8 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
       const updates: Partial<UserProfile> = {
         username: username.trim(),
         avatar: avatarPreview,
+        selectedAvatarFrame: selectedFrame,
+        selectedFeltColor: selectedFelt,
       };
 
       // Update in Firestore
@@ -174,7 +227,7 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 10 }}
-        className="relative w-full max-w-2xl bg-zinc-950 border border-zinc-800 rounded-2xl sm:rounded-3xl p-4 sm:p-6 text-zinc-100 shadow-2xl shadow-black/90 my-auto overflow-hidden"
+        className="relative w-full max-w-3xl bg-zinc-950 border border-zinc-800 rounded-2xl sm:rounded-3xl p-4 sm:p-6 text-zinc-100 shadow-2xl shadow-black/90 my-auto max-h-[92vh] overflow-y-auto"
       >
         {/* Top Header */}
         <div className="flex items-center justify-between pb-4 border-b border-zinc-800/80">
@@ -184,7 +237,7 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-black text-white tracking-tight flex items-center space-x-2">
-                <span>{lang === 'az' ? 'Hesab & Profil Ayarları' : 'Account & Profile Settings'}</span>
+                <span>{lang === 'az' ? 'Hesab, VIP & Profil Ayarları' : 'Account, VIP & Profile Settings'}</span>
                 {user.isAdmin && (
                   <span className="text-[10px] bg-amber-500 text-zinc-950 font-black px-2 py-0.5 rounded-full uppercase">
                     Admin
@@ -193,8 +246,8 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
               </h2>
               <p className="text-xs text-zinc-400">
                 {lang === 'az'
-                  ? 'Qeydiyyat məlumatları, qaleriyadan profil şəkli, depozit və çıxarış tarixçəsi'
-                  : 'Account details, gallery profile picture, deposit and withdrawal history'}
+                  ? 'VIP səviyyə tərəqqisi, eksklüziv çərçivələr, masa örtükləri və profil tənzimləmələri'
+                  : 'VIP progression, exclusive avatar frames, felts & account management'}
               </p>
             </div>
           </div>
@@ -220,6 +273,19 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
           >
             <User className="w-3.5 h-3.5" />
             <span>{lang === 'az' ? '👤 Profil & Şəkil' : '👤 Profile & Photo'}</span>
+          </button>
+
+          {/* VIP Progression Tab */}
+          <button
+            onClick={() => setActiveTab('vip')}
+            className={`px-3 py-2 rounded-xl text-xs font-black flex items-center space-x-1.5 transition-all whitespace-nowrap cursor-pointer ${
+              activeTab === 'vip'
+                ? 'bg-gradient-to-r from-amber-400 to-yellow-500 text-zinc-950 shadow-lg shadow-amber-500/30'
+                : 'bg-zinc-900 text-amber-400 hover:text-amber-300 hover:bg-zinc-850 border border-amber-500/30'
+            }`}
+          >
+            <Crown className="w-3.5 h-3.5" />
+            <span>{lang === 'az' ? `⭐ VIP & Titullar (Lvl ${vipState.currentLevel})` : `⭐ VIP & Rewards (Lvl ${vipState.currentLevel})`}</span>
           </button>
 
           <button
@@ -272,22 +338,22 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
         {/* Tab 1: Profile & Gallery Photo Upload */}
         {activeTab === 'profile' && (
           <div className="py-4 space-y-5">
-            {/* Avatar Selection from Gallery */}
+            {/* Avatar Selection from Gallery & Frame preview */}
             <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-5">
               <div className="relative group">
-                <div className="w-24 h-24 rounded-full ring-4 ring-amber-400/60 shadow-xl overflow-hidden bg-zinc-950 flex items-center justify-center">
-                  <img
-                    src={avatarPreview || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&h=200&fit=crop&crop=faces'}
-                    alt="Avatar"
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                </div>
+                <AvatarWithFrame
+                  src={avatarPreview || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&h=200&fit=crop&crop=faces'}
+                  alt={user.username}
+                  size="2xl"
+                  frameId={selectedFrame}
+                  vipLevel={vipState.currentLevel}
+                  showLevelBadge
+                />
 
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="absolute inset-0 bg-black/60 rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white cursor-pointer"
+                  className="absolute inset-0 bg-black/60 rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white cursor-pointer z-30"
                 >
                   <Camera className="w-6 h-6 mb-1 text-amber-400" />
                   <span className="text-[10px] font-bold">Dəyiş</span>
@@ -295,13 +361,18 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
               </div>
 
               <div className="space-y-2 text-center sm:text-left flex-1">
-                <h3 className="text-sm font-bold text-white">
-                  {lang === 'az' ? 'Profil Şəklinizi Qaleriyadan Yükləyin' : 'Upload Avatar from Gallery'}
-                </h3>
-                <p className="text-xs text-zinc-400">
+                <div className="flex items-center justify-center sm:justify-start space-x-2">
+                  <h3 className="text-sm font-bold text-white">
+                    {lang === 'az' ? 'Profil Şəkli və Çərçivəniz' : 'Profile Picture & Frame'}
+                  </h3>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">
+                    VIP Səviyyə {vipState.currentLevel} ({vipState.currentTier.nameAz})
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400 leading-relaxed">
                   {lang === 'az'
-                    ? 'Telefonunuzun və ya kompüterinizin qaleriyasından şəxsi şəklinizi seçərək masalarda digər oyunçulara fərdi görünüş qazanın.'
-                    : 'Select a custom photo from your device gallery to personalize your poker table presence.'}
+                    ? 'Telefonunuzun və ya kompüterinizin qaleriyasından şəxsi şəklinizi seçin və "VIP & Titullar" bölməsindən qazandığınız eksklüziv çərçivələri tətbiq edin.'
+                    : 'Select a custom photo and apply unlockable VIP frames to stand out on real tables.'}
                 </p>
 
                 <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 pt-1">
@@ -327,6 +398,15 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
                     className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-xl text-xs font-medium border border-zinc-800 transition-colors cursor-pointer"
                   >
                     Sıfırla
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('vip')}
+                    className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-xl text-xs font-bold border border-amber-500/40 transition-colors cursor-pointer flex items-center space-x-1"
+                  >
+                    <Crown className="w-3 h-3" />
+                    <span>Çərçivələri İdarə Et</span>
                   </button>
                 </div>
               </div>
@@ -384,6 +464,324 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
                 <Save className="w-4 h-4" />
                 <span>{isSaving ? 'Saxlanılır...' : (lang === 'az' ? 'Dəyişiklikləri Saxla' : 'Save Changes')}</span>
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tab: VIP Progression & Rewards */}
+        {activeTab === 'vip' && (
+          <div className="py-4 space-y-6">
+            {/* VIP Tier Hero Banner */}
+            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-zinc-900 via-zinc-900 to-amber-950/40 border-2 border-amber-500/40 p-5 shadow-2xl">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center space-x-4">
+                  <AvatarWithFrame
+                    src={avatarPreview || user.avatar}
+                    alt={user.username}
+                    size="xl"
+                    frameId={selectedFrame}
+                    vipLevel={vipState.currentLevel}
+                    showLevelBadge
+                  />
+
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs font-black px-2.5 py-0.5 rounded-full bg-amber-500 text-zinc-950 uppercase tracking-wider">
+                        {vipState.currentTier.badgeTitle}
+                      </span>
+                      <span className="text-xs text-amber-400 font-bold">
+                        {vipState.currentTier.nameAz}
+                      </span>
+                    </div>
+                    <h3 className="text-xl font-black text-white mt-1">
+                      {user.username}
+                    </h3>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      {lang === 'az' ? 'Cari XP balınız: ' : 'Current XP: '}
+                      <strong className="text-amber-300 font-mono font-black">{vipState.totalXp} XP</strong>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Progress to Next Tier */}
+                <div className="w-full sm:w-64 bg-zinc-950/80 p-3.5 rounded-xl border border-zinc-800 space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-zinc-400 font-medium">
+                      {vipState.isMaxLevel ? 'Maksimal Səviyyə' : `Növbəti: ${vipState.nextTier?.nameAz}`}
+                    </span>
+                    <span className="text-amber-400 font-bold font-mono">
+                      {vipState.isMaxLevel ? 'MAX' : `${vipState.progressPercent}%`}
+                    </span>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="w-full h-3 bg-zinc-800 rounded-full overflow-hidden p-0.5 border border-zinc-700">
+                    <div
+                      className="h-full bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-300 rounded-full transition-all duration-700 shadow-sm"
+                      style={{ width: `${vipState.progressPercent}%` }}
+                    />
+                  </div>
+
+                  <div className="flex justify-between text-[11px] text-zinc-400">
+                    <span>{vipState.totalXp} XP</span>
+                    <span>
+                      {vipState.isMaxLevel
+                        ? '12,000+ XP'
+                        : `${vipState.xpNeededForNextLevel} XP qaldı`}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* How to earn XP reminder */}
+              <div className="mt-4 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-300">
+                <div className="flex items-center space-x-1.5 text-amber-300">
+                  <Zap className="w-4 h-4 text-yellow-400 shrink-0 animate-pulse" />
+                  <span>
+                    {lang === 'az'
+                      ? 'Real pullu masalarda hər oynanılan ələ görə +10 XP, qələbəyə görə +15 XP qazanırsınız!'
+                      : 'Earn +10 XP per real-money hand played and +15 XP for every win!'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Custom Avatar Frames Showcase & Equipping */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Crown className="w-4 h-4 text-amber-400" />
+                  <span>{lang === 'az' ? 'Eksklüziv Avatar Çərçivələri' : 'Unlockable Avatar Frames'}</span>
+                </h4>
+                <span className="text-xs text-zinc-400">
+                  {lang === 'az' ? 'Seçmək üçün çərçivəyə klikləyin' : 'Click to equip'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {ALL_VIP_LEVELS.map((tier) => {
+                  const isUnlocked = vipState.currentLevel >= tier.level;
+                  const isEquipped = selectedFrame === tier.avatarFrame.id;
+
+                  return (
+                    <div
+                      key={tier.avatarFrame.id}
+                      className={`relative p-3 rounded-2xl border transition-all flex flex-col justify-between ${
+                        isEquipped
+                          ? 'bg-gradient-to-b from-amber-950/40 to-zinc-900 border-amber-400 ring-2 ring-amber-400/40 shadow-lg shadow-amber-500/10'
+                          : isUnlocked
+                          ? 'bg-zinc-900/80 border-zinc-800 hover:border-zinc-700'
+                          : 'bg-zinc-950/60 border-zinc-900 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-3 mb-2">
+                        <AvatarWithFrame
+                          src={avatarPreview || user.avatar}
+                          alt={tier.avatarFrame.nameAz}
+                          size="md"
+                          frameId={tier.avatarFrame.id}
+                          vipLevel={tier.level}
+                        />
+
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white truncate">
+                            {tier.avatarFrame.nameAz}
+                          </div>
+                          <div className="text-[10px] text-zinc-400 flex items-center space-x-1">
+                            <span>Səviyyə {tier.level}</span>
+                            <span>•</span>
+                            <span className="text-amber-400/90 font-mono">{tier.minXp} XP</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-zinc-400 leading-tight mb-3">
+                        {tier.avatarFrame.descriptionAz}
+                      </p>
+
+                      {/* Action Button */}
+                      {isUnlocked ? (
+                        <button
+                          type="button"
+                          onClick={() => handleEquipFrame(tier.avatarFrame.id)}
+                          className={`w-full py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer ${
+                            isEquipped
+                              ? 'bg-amber-500 text-zinc-950 font-black shadow-md'
+                              : 'bg-zinc-800 hover:bg-zinc-750 text-white border border-zinc-700'
+                          }`}
+                        >
+                          {isEquipped ? (
+                            <>
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Aktiv Çərçivə</span>
+                            </>
+                          ) : (
+                            <span>Tətbiq Et</span>
+                          )}
+                        </button>
+                      ) : (
+                        <div className="w-full py-1.5 rounded-xl bg-zinc-950 text-zinc-600 text-xs font-medium border border-zinc-900 flex items-center justify-center space-x-1">
+                          <Lock className="w-3.5 h-3.5 text-zinc-600" />
+                          <span>VIP {tier.level} Tələb olunur</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Exclusive Felt Colors Showcase & Equipping */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Palette className="w-4 h-4 text-cyan-400" />
+                  <span>{lang === 'az' ? 'VIP Eksklüziv Masa Örtükləri (Felt Colors)' : 'VIP Exclusive Felts'}</span>
+                </h4>
+                <span className="text-xs text-zinc-400">
+                  {lang === 'az' ? 'Seçilmiş örtük masalarda avtomatik tətbiq olunur' : 'Auto-applied on tables'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {ALL_VIP_LEVELS.map((tier) => {
+                  const isUnlocked = vipState.currentLevel >= tier.level;
+                  const isEquipped = selectedFelt === tier.feltColor.id;
+
+                  return (
+                    <div
+                      key={tier.feltColor.id}
+                      className={`relative p-3 rounded-2xl border transition-all flex flex-col justify-between ${
+                        isEquipped
+                          ? 'bg-gradient-to-b from-cyan-950/40 to-zinc-900 border-cyan-400 ring-2 ring-cyan-400/40 shadow-lg shadow-cyan-500/10'
+                          : isUnlocked
+                          ? 'bg-zinc-900/80 border-zinc-800 hover:border-zinc-700'
+                          : 'bg-zinc-950/60 border-zinc-900 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-3 mb-2">
+                        <div
+                          className="w-10 h-10 rounded-xl border border-white/20 shadow-md shrink-0 flex items-center justify-center"
+                          style={{ background: tier.feltColor.tableGradient }}
+                        >
+                          {!isUnlocked && <Lock className="w-4 h-4 text-white/70" />}
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white truncate">
+                            {tier.feltColor.nameAz}
+                          </div>
+                          <div className="text-[10px] text-zinc-400">
+                            {tier.level === 1 ? 'Standart' : `VIP Səviyyə ${tier.level}+`}
+                          </div>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-zinc-400 leading-tight mb-3">
+                        {tier.feltColor.descriptionAz}
+                      </p>
+
+                      {/* Action Button */}
+                      {isUnlocked ? (
+                        <button
+                          type="button"
+                          onClick={() => handleEquipFelt(tier.feltColor.id)}
+                          className={`w-full py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1 cursor-pointer ${
+                            isEquipped
+                              ? 'bg-cyan-500 text-zinc-950 font-black shadow-md'
+                              : 'bg-zinc-800 hover:bg-zinc-750 text-white border border-zinc-700'
+                          }`}
+                        >
+                          {isEquipped ? (
+                            <>
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Aktiv Örtük</span>
+                            </>
+                          ) : (
+                            <span>Tətbiq Et</span>
+                          )}
+                        </button>
+                      ) : (
+                        <div className="w-full py-1.5 rounded-xl bg-zinc-950 text-zinc-600 text-xs font-medium border border-zinc-900 flex items-center justify-center space-x-1">
+                          <Lock className="w-3.5 h-3.5 text-zinc-600" />
+                          <span>VIP {tier.level} Tələb olunur</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* VIP Levels Perks Roadmap */}
+            <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 space-y-4">
+              <h4 className="text-xs font-black text-amber-400 uppercase tracking-wider flex items-center space-x-1.5">
+                <Award className="w-4 h-4 text-amber-400" />
+                <span>{lang === 'az' ? 'VIP Səviyyə İmtiyazları & Yol Xəritəsi' : 'VIP Tiers & Benefits Roadmap'}</span>
+              </h4>
+
+              <div className="space-y-2">
+                {ALL_VIP_LEVELS.map((tier) => {
+                  const isCurrent = vipState.currentLevel === tier.level;
+                  const isPast = vipState.currentLevel > tier.level;
+
+                  return (
+                    <div
+                      key={tier.level}
+                      className={`p-3 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs transition-colors ${
+                        isCurrent
+                          ? 'bg-amber-500/10 border-amber-500/60 text-white'
+                          : isPast
+                          ? 'bg-zinc-900/40 border-zinc-800 text-zinc-400'
+                          : 'bg-zinc-950/40 border-zinc-900 text-zinc-500'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-3">
+                        <span className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[11px] ${
+                          isCurrent
+                            ? 'bg-amber-500 text-zinc-950'
+                            : isPast
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                            : 'bg-zinc-800 text-zinc-500'
+                        }`}>
+                          {isPast ? '✓' : tier.level}
+                        </span>
+
+                        <div>
+                          <div className="font-bold flex items-center space-x-2">
+                            <span className={isCurrent ? 'text-amber-300 font-black' : 'text-zinc-200'}>
+                              {tier.nameAz}
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 font-mono">
+                              {tier.minXp} XP
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-zinc-400 mt-0.5">
+                            {tier.perksAz.join(' • ')}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="shrink-0">
+                        {isCurrent ? (
+                          <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-500 text-zinc-950 uppercase">
+                            Cari Səviyyə
+                          </span>
+                        ) : isPast ? (
+                          <span className="text-[10px] font-bold text-emerald-400">
+                            Açılıb ✅
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-zinc-500 flex items-center space-x-1">
+                            <Lock className="w-3 h-3" />
+                            <span>{tier.minXp - vipState.totalXp} XP qaldı</span>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}
@@ -544,7 +942,7 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
 
                 <div className="bg-zinc-950/80 p-3 rounded-xl border border-zinc-800/80 space-y-1">
                   <span className="text-zinc-500 block text-[11px]">VIP Səviyyə:</span>
-                  <strong className="text-yellow-400 font-bold">VIP {user.vipLevel || 1}</strong>
+                  <strong className="text-yellow-400 font-bold">VIP {vipState.currentLevel} ({vipState.currentTier.nameAz})</strong>
                 </div>
               </div>
             </div>

@@ -11,12 +11,15 @@ import {
   HandHistoryRecord,
   ChatMessage,
   FloatingEmoji,
-  BotSystemConfig
+  BotSystemConfig,
+  PlayerHandActionLog
 } from '../types/poker';
 import { translations, Language } from '../utils/translations';
 import { PlayingCard } from './PlayingCard';
 import { ActionControls } from './ActionControls';
 import { TableChat } from './TableChat';
+import { TableStatsModal } from './TableStatsModal';
+import { calculatePlayerSessionStats } from '../utils/pokerStats';
 import { 
   evaluateBestHand, 
   getBotAction, 
@@ -26,7 +29,38 @@ import {
 import { createBotPlayer } from '../utils/mockData';
 import { soundManager } from '../utils/audioEngine';
 import confetti from 'canvas-confetti';
-import { recordTableRake, subscribeToBotSystemConfig, fetchBotSystemConfigFromFirestore } from '../services/firebase';
+import { AvatarWithFrame } from './AvatarWithFrame';
+import { ALL_VIP_LEVELS, calculateVipProgress } from '../utils/vipProgression';
+import { 
+  recordTableRake, 
+  subscribeToBotSystemConfig, 
+  fetchBotSystemConfigFromFirestore,
+  subscribeToTableState,
+  saveTableToFirestore,
+  saveTableStateAtomicInFirestore,
+  leaveTableSeatInFirestore,
+  leaveTableSeatInFirestoreAtomic,
+  joinTableSeatInFirestoreAtomic,
+  sendTableChatMessage,
+  subscribeToTableChat,
+  sendTableEmoji,
+  subscribeToTableEmojis
+} from '../services/firebase';
+import {
+  joinTableSocket,
+  leaveTableSocket,
+  emitPlayerLeaveSocket,
+  syncTableStateSocket,
+  emitPlayerActionSocket,
+  subscribeToPlayerActionSocket,
+  subscribeToTableStateSocket,
+  sendTableChatMessageSocket,
+  subscribeToTableChatSocket,
+  sendTableEmojiSocket,
+  subscribeToTableEmojiSocket,
+  subscribeToPlayerKickedSocket,
+  subscribeToTableClosedSocket,
+} from '../services/socket';
 import { 
   LogOut, 
   PlusCircle, 
@@ -44,8 +78,32 @@ import {
   PlayCircle,
   Gift,
   MessageSquare,
-  Percent
+  Percent,
+  Zap,
+  Tag,
+  Edit3,
+  BarChart2,
+  Share2,
+  Check,
+  Menu,
+  RotateCw,
+  X,
+  Layers,
+  ArrowDown,
+  HelpCircle,
+  BookOpen,
+  Home
 } from 'lucide-react';
+import {
+  QUICK_CHAT_PHRASES,
+  getQuickPhraseText,
+} from '../constants/chatPhrases';
+import { PlayerNoteModal } from './PlayerNoteModal';
+import {
+  getAllPlayerNotes,
+  getPresetByColor,
+  PlayerNote,
+} from '../utils/playerNotes';
 
 interface PokerTableProps {
   initialTable: PokerTableState;
@@ -60,6 +118,7 @@ interface PokerTableProps {
   isFourColor: boolean;
   feltColor: FeltColor;
   autoMuck: boolean;
+  autoRebuy?: boolean;
 }
 
 export const PokerTable: React.FC<PokerTableProps> = ({
@@ -75,10 +134,11 @@ export const PokerTable: React.FC<PokerTableProps> = ({
   isFourColor,
   feltColor,
   autoMuck,
+  autoRebuy = true,
 }) => {
   const t = translations[lang];
   const [table, setTable] = useState<PokerTableState>(initialTable);
-  const [turnTimeLeft, setTurnTimeLeft] = useState<number>(initialTable.timeBank);
+  const [turnTimeLeft, setTurnTimeLeft] = useState<number>(initialTable.timeBank || 30);
   const [preAction, setPreAction] = useState<'check_fold' | 'check' | 'call_any' | null>(null);
   const [sitOutNextHand, setSitOutNextHand] = useState(false);
   const [showRebuyModal, setShowRebuyModal] = useState(false);
@@ -96,6 +156,71 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     },
   ]);
   const [floatingEmojis, setFloatingEmojis] = useState<FloatingEmoji[]>([]);
+  const [playerSpeechBubbles, setPlayerSpeechBubbles] = useState<Record<string, { text: string; id: string }>>({});
+
+  const triggerSpeechBubble = (senderName: string, text: string) => {
+    if (!senderName) return;
+    const bubbleId = `bubble_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    setPlayerSpeechBubbles((prev) => ({
+      ...prev,
+      [senderName]: { text, id: bubbleId },
+    }));
+    setTimeout(() => {
+      setPlayerSpeechBubbles((prev) => {
+        if (prev[senderName]?.id === bubbleId) {
+          const next = { ...prev };
+          delete next[senderName];
+          return next;
+        }
+        return prev;
+      });
+    }, 4200);
+  };
+
+  // Local Browser Stored Player Notes
+  const [playerNotes, setPlayerNotes] = useState<Record<string, PlayerNote>>(() => getAllPlayerNotes());
+  const [noteTargetPlayer, setNoteTargetPlayer] = useState<Player | null>(null);
+
+  const handleRefreshPlayerNotes = () => {
+    setPlayerNotes(getAllPlayerNotes());
+  };
+
+  const [showStatsModal, setShowStatsModal] = useState<boolean>(false);
+  const [copiedRoomToast, setCopiedRoomToast] = useState<boolean>(false);
+  const [isLeftDrawerOpen, setIsLeftDrawerOpen] = useState<boolean>(false);
+  const [isRefreshingTable, setIsRefreshingTable] = useState<boolean>(false);
+  const [showJackpotModal, setShowJackpotModal] = useState<boolean>(false);
+  const jackpotPool = 14250.75;
+
+  const handleManualTableRefresh = () => {
+    soundManager.playButtonClick();
+    setIsRefreshingTable(true);
+    setTimeout(() => {
+      setIsRefreshingTable(false);
+    }, 600);
+  };
+
+  const handleShareRoomLink = () => {
+    soundManager.playButtonClick();
+    const roomUrl = `${window.location.origin}${window.location.pathname}?table=${table.id}`;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(roomUrl).catch(() => {});
+    }
+    setCopiedRoomToast(true);
+    setTimeout(() => setCopiedRoomToast(false), 3000);
+  };
+
+  const currentHandActionTrackingRef = useRef<Record<string, PlayerHandActionLog>>({});
+
+  // Compute live session stats for Hero to display in HUD and header
+  const heroLiveStats = calculatePlayerSessionStats(
+    handHistory,
+    currentUser.id,
+    currentUser.username,
+    true,
+    lang
+  );
+
   const [winnerBanner, setWinnerBanner] = useState<{ 
     name: string; 
     amount: number; 
@@ -122,24 +247,42 @@ export const PokerTable: React.FC<PokerTableProps> = ({
   const botTurnTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const nextHandTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Identify human player seat
-  const humanPlayer = table.players.find((p) => p && p.isHuman) || null;
-  const humanSeatIndex = humanPlayer ? humanPlayer.seatIndex : 0;
-  const isHumanTurn = table.currentTurnSeatIndex === humanSeatIndex && table.stage !== 'showdown' && table.stage !== 'hand_ended' && table.stage !== 'waiting';
+  // Identify local human player seat specifically by currentUser.id (Multi-Device Multi-Player Safe)
+  const humanPlayer = table.players.find((p) => p && p.id === currentUser.id) || null;
+  const humanSeatIndex = humanPlayer ? humanPlayer.seatIndex : -1;
+  const isHumanTurn = humanPlayer !== null && table.currentTurnSeatIndex === humanSeatIndex && table.stage !== 'showdown' && table.stage !== 'hand_ended' && table.stage !== 'waiting';
+
+  // The first seated human player (or anyone if no humans) acts as the deterministic table orchestrator for bot actions & hand transitions
+  const firstHumanPlayer = table.players.find((p) => p && p.isHuman);
+  const isTableOrchestrator = !firstHumanPlayer || firstHumanPlayer.id === currentUser.id;
+
+  // Unified Real-time Broadcast: Sub-millisecond WebSocket push + Durable Firestore persistence
+  const broadcastTableState = (stateToBroadcast: PokerTableState) => {
+    const stateWithTimestamp: PokerTableState = {
+      ...stateToBroadcast,
+      updatedAt: Date.now(),
+    };
+    try {
+      syncTableStateSocket(stateWithTimestamp);
+    } catch (e) {
+      console.warn('Socket sync error:', e);
+    }
+    saveTableToFirestore(stateWithTimestamp);
+  };
 
   // Evaluate human current best hand
-  const humanHandEval = humanPlayer && humanPlayer.cards.length > 0
+  const humanHandEval = humanPlayer && humanPlayer.cards && humanPlayer.cards.length > 0
     ? evaluateBestHand(humanPlayer.cards, table.communityCards, table.gameType)
     : null;
 
-  // Turn Timer countdown effect
+  // Turn Timer countdown effect (30s default)
   useEffect(() => {
     if (table.stage === 'showdown' || table.stage === 'hand_ended' || table.stage === 'waiting') {
       if (turnTimerRef.current) clearInterval(turnTimerRef.current);
       return;
     }
 
-    setTurnTimeLeft(table.timeBank);
+    setTurnTimeLeft(table.timeBank || 30);
     if (turnTimerRef.current) clearInterval(turnTimerRef.current);
 
     turnTimerRef.current = setInterval(() => {
@@ -160,24 +303,58 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     return () => {
       if (turnTimerRef.current) clearInterval(turnTimerRef.current);
     };
-  }, [table.currentTurnSeatIndex, table.stage]);
+  }, [table.currentTurnSeatIndex, table.stage, table.timeBank]);
 
   const [handsPlayedCount, setHandsPlayedCount] = useState<number>(0);
+  const [nextHandCountdown, setNextHandCountdown] = useState<number | null>(null);
 
-  // Real-time Bot Settings from Admin Panel / Firestore (Pro mode active by default)
-  const [botConfig, setBotConfig] = useState<BotSystemConfig>({
-    isBotsActive: true,
-    botDifficulty: 'pro',
-    autoJoinLeaveEnabled: true,
-    minThinkSeconds: 4,
-    maxThinkSeconds: 9,
-    targetTableOccupancy: 4,
+  // Real-time Bot Settings from Admin Panel / Firestore (Bots disabled by default until Admin enables them)
+  const [botConfig, setBotConfig] = useState<BotSystemConfig>(() => {
+    try {
+      const local = localStorage.getItem('royal_poker_bot_config');
+      if (local) {
+        const parsed = JSON.parse(local);
+        return {
+          isBotsActive: parsed.isBotsActive === true,
+          botDifficulty: parsed.botDifficulty || 'pro',
+          autoJoinLeaveEnabled: parsed.autoJoinLeaveEnabled === true,
+          minThinkSeconds: parsed.minThinkSeconds || 4,
+          maxThinkSeconds: parsed.maxThinkSeconds || 9,
+          targetTableOccupancy: parsed.targetTableOccupancy || 4,
+        };
+      }
+    } catch {}
+    return {
+      isBotsActive: false,
+      botDifficulty: 'pro',
+      autoJoinLeaveEnabled: false,
+      minThinkSeconds: 4,
+      maxThinkSeconds: 9,
+      targetTableOccupancy: 4,
+    };
   });
 
   useEffect(() => {
     // Initial fetch
     fetchBotSystemConfigFromFirestore().then((cfg) => {
-      if (cfg) setBotConfig(cfg);
+      if (cfg) {
+        setBotConfig(cfg);
+        if (cfg.isBotsActive !== true) {
+          setTable((prev) => {
+            const hasBots = prev.players.some((p) => p && !p.isHuman);
+            if (!hasBots) return prev;
+            const sanitized = prev.players.map((p) => (p && !p.isHuman ? null : p));
+            return {
+              ...prev,
+              players: sanitized,
+              stage: sanitized.filter((p) => p !== null).length < 2 ? 'waiting' : prev.stage,
+              pot: sanitized.filter((p) => p !== null).length < 2 ? 0 : prev.pot,
+              communityCards: sanitized.filter((p) => p !== null).length < 2 ? [] : prev.communityCards,
+              handWinners: sanitized.filter((p) => p !== null).length < 2 ? [] : prev.handWinners,
+            };
+          });
+        }
+      }
     });
 
     // Real-time listener so whenever admin changes difficulty or timer, all tables update live
@@ -185,14 +362,18 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       if (cfg) {
         setBotConfig(cfg);
         // If bots were just deactivated, instantly remove all bots from the table
-        if (cfg.isBotsActive === false) {
+        if (cfg.isBotsActive !== true) {
           setTable((prev) => {
             const hasBots = prev.players.some((p) => p && !p.isHuman);
             if (!hasBots) return prev;
+            const sanitized = prev.players.map((p) => (p && !p.isHuman ? null : p));
             return {
               ...prev,
-              players: prev.players.map((p) => (p && !p.isHuman ? null : p)),
-              stage: prev.players.filter((p) => p && p.isHuman).length < 2 ? 'waiting' : prev.stage,
+              players: sanitized,
+              stage: sanitized.filter((p) => p !== null).length < 2 ? 'waiting' : prev.stage,
+              pot: sanitized.filter((p) => p !== null).length < 2 ? 0 : prev.pot,
+              communityCards: sanitized.filter((p) => p !== null).length < 2 ? [] : prev.communityCards,
+              handWinners: sanitized.filter((p) => p !== null).length < 2 ? [] : prev.handWinners,
             };
           });
         }
@@ -204,9 +385,225 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     };
   }, []);
 
-  // When table is waiting, human is seated, and bots are active, spawn bots to start game
+  // Real-Time Multiplayer Table State Synchronization (WebSocket 0-delay + Firestore fallback)
   useEffect(() => {
-    if (table.stage === 'waiting' && botConfig.isBotsActive !== false && botConfig.autoJoinLeaveEnabled) {
+    const handleRemoteTableUpdate = (remoteTable: PokerTableState) => {
+      if (!remoteTable || !remoteTable.id) return;
+      setTable((prev) => {
+        // Keep human player's local hole cards intact
+        const currentLocalHuman = prev.players.find((p) => p && p.id === currentUser.id);
+        const capacity = remoteTable.capacity || prev.capacity || 6;
+        const incomingPlayers = Array.isArray(remoteTable.players) ? [...remoteTable.players] : [];
+        while (incomingPlayers.length < capacity) {
+          incomingPlayers.push(null);
+        }
+
+        const updatedPlayers = incomingPlayers.map((rp) => {
+          if (rp && currentLocalHuman && rp.id === currentUser.id && currentLocalHuman.cards?.length > 0 && (!rp.cards || rp.cards.length === 0)) {
+            return {
+              ...rp,
+              cards: currentLocalHuman.cards,
+            };
+          }
+          return rp;
+        });
+
+        return {
+          ...remoteTable,
+          players: updatedPlayers,
+          feltColor: prev.feltColor || remoteTable.feltColor,
+        };
+      });
+
+      // Synchronize winner banner for all clients when hand ends
+      if (remoteTable.stage === 'hand_ended' && remoteTable.handWinners && remoteTable.handWinners.length > 0) {
+        const firstW = remoteTable.handWinners[0];
+        const winnerNames = remoteTable.handWinners.map((w) => {
+          const p = (remoteTable.players || []).find((pl) => pl && pl.id === w.playerId);
+          return p ? p.name : 'Winner';
+        }).join(' & ');
+        setWinnerBanner({
+          name: winnerNames,
+          amount: firstW.amount,
+          totalPot: remoteTable.pot,
+          handName: firstW.handName,
+        });
+      } else if (remoteTable.stage === 'preflop') {
+        setWinnerBanner(null);
+      }
+    };
+
+    // Join Table Room via WebSocket
+    joinTableSocket(initialTable.id, { id: currentUser.id, username: currentUser.username });
+
+    // 0. Zero-Latency Live Player Action Broadcast Listener (Instant sound & movement across all devices)
+    const unsubSocketAction = subscribeToPlayerActionSocket(initialTable.id, (actionData) => {
+      if (!actionData) return;
+      // Only trigger if action is from another player at this table
+      if (actionData.playerId !== currentUser.id) {
+        if (actionData.actionType === 'fold') {
+          soundManager.playFoldSound();
+        } else if (actionData.actionType === 'check') {
+          soundManager.playCheckSound();
+        } else if (actionData.actionType === 'all_in') {
+          soundManager.playAllInSound();
+        } else {
+          soundManager.playChipSound();
+        }
+
+        const pName = actionData.playerName || 'Player';
+        const actionLabel = actionData.actionType.toUpperCase() + (actionData.amount && actionData.amount > 0 ? ` $${actionData.amount.toFixed(2)}` : '');
+        triggerSpeechBubble(pName, actionLabel);
+      }
+    });
+
+    // 1. Primary Low-Latency WebSocket Synchronization
+    const unsubSocketTable = subscribeToTableStateSocket(initialTable.id, handleRemoteTableUpdate);
+
+    // 2. Persistent Firestore Synchronization
+    const unsubFirestoreTable = subscribeToTableState(initialTable.id, handleRemoteTableUpdate);
+
+    // 3. Real-Time Table Chat Listeners (WebSocket + Firestore deduplicated)
+    const unsubSocketChat = subscribeToTableChatSocket(initialTable.id, (msg) => {
+      if (!msg) return;
+      setChatMessages((prev) => {
+        if (prev.some((m) => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
+      if (!msg.isSystem && Date.now() - msg.timestamp < 6000) {
+        triggerSpeechBubble(msg.senderName, msg.text);
+      }
+    });
+
+    const unsubFirestoreChat = subscribeToTableChat(initialTable.id, (remoteMsgs) => {
+      if (remoteMsgs && remoteMsgs.length > 0) {
+        setChatMessages((prev) => {
+          const existingIds = new Set(prev.map((m) => m.id));
+          const newOnes = remoteMsgs.filter((m) => !existingIds.has(m.id));
+          if (newOnes.length === 0) return prev;
+          return [...prev, ...newOnes];
+        });
+        const latest = remoteMsgs[remoteMsgs.length - 1];
+        if (latest && !latest.isSystem && Date.now() - latest.timestamp < 6000) {
+          triggerSpeechBubble(latest.senderName, latest.text);
+        }
+      }
+    });
+
+    // 4. Real-Time Table Emojis Listeners (WebSocket + Firestore)
+    const unsubSocketEmojis = subscribeToTableEmojiSocket(initialTable.id, (incomingEmoji) => {
+      setFloatingEmojis((prev) => [...prev, incomingEmoji]);
+      setTimeout(() => {
+        setFloatingEmojis((prev) => prev.filter((e) => e.id !== incomingEmoji.id));
+      }, 3000);
+    });
+
+    const unsubFirestoreEmojis = subscribeToTableEmojis(initialTable.id, (incomingEmoji) => {
+      setFloatingEmojis((prev) => [...prev, incomingEmoji]);
+      setTimeout(() => {
+        setFloatingEmojis((prev) => prev.filter((e) => e.id !== incomingEmoji.id));
+      }, 3000);
+    });
+
+    // 5. Admin Kicked Player listener
+    const unsubKicked = subscribeToPlayerKickedSocket(initialTable.id, ({ playerId, reason }) => {
+      if (playerId === currentUser.id) {
+        setTable((latestTable) => {
+          const myPlayer = (latestTable.players || []).find((p) => p && p.id === currentUser.id);
+          const uncommittedChips = myPlayer ? Number(Math.max(0, myPlayer.chips).toFixed(2)) : 0;
+          if (uncommittedChips > 0) {
+            onUpdateUserBalance(
+              Number((currentUser.realBalance + uncommittedChips).toFixed(2)),
+              currentUser.playMoneyBalance,
+              currentUser.bonusBalance
+            );
+          }
+          return latestTable;
+        });
+        soundManager.playErrorSound();
+        alert(reason || '⚠️ Admin tərəfindən masadan kənarlaşdırıldınız.');
+        onLeaveTable();
+      }
+    });
+
+    // 6. Admin Table Closed listener
+    const unsubClosed = subscribeToTableClosedSocket(initialTable.id, ({ reason }) => {
+      setTable((latestTable) => {
+        const myPlayer = (latestTable.players || []).find((p) => p && p.id === currentUser.id);
+        const uncommittedChips = myPlayer ? Number(Math.max(0, myPlayer.chips).toFixed(2)) : 0;
+        if (uncommittedChips > 0) {
+          onUpdateUserBalance(
+            Number((currentUser.realBalance + uncommittedChips).toFixed(2)),
+            currentUser.playMoneyBalance,
+            currentUser.bonusBalance
+          );
+        }
+        return latestTable;
+      });
+      soundManager.playErrorSound();
+      alert(reason || '⚠️ Masa Admin tərəfindən bağlandı.');
+      onLeaveTable();
+    });
+
+    return () => {
+      leaveTableSocket(initialTable.id, currentUser.id);
+      unsubSocketAction();
+      unsubSocketTable();
+      unsubFirestoreTable();
+      unsubSocketChat();
+      unsubFirestoreChat();
+      unsubSocketEmojis();
+      unsubFirestoreEmojis();
+      unsubKicked();
+      unsubClosed();
+    };
+  }, [initialTable.id, currentUser.id]);
+
+  // Persist active table session in browser storage for instant recovery on refresh
+  useEffect(() => {
+    if (table.id) {
+      try {
+        localStorage.setItem('poker_active_table_id', table.id);
+      } catch {}
+    }
+  }, [table.id]);
+
+  // When hand ends, start a 4-second countdown and automatically deal the next hand!
+  useEffect(() => {
+    if (table.stage !== 'hand_ended') {
+      setNextHandCountdown(null);
+      if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
+      return;
+    }
+
+    setNextHandCountdown(4);
+    const countdownInterval = setInterval(() => {
+      setNextHandCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(countdownInterval);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    // Orchestrator executes at exactly 4000ms. Other clients have a 5500ms fallback
+    const delay = isTableOrchestrator ? 4000 : 5500;
+    if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
+    nextHandTimeoutRef.current = setTimeout(() => {
+      startNextHand();
+    }, delay);
+
+    return () => {
+      clearInterval(countdownInterval);
+      if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
+    };
+  }, [table.stage, table.handNumber, isTableOrchestrator]);
+
+  // When table is waiting, human is seated, and bots are active, spawn bots to start game (Orchestrator only)
+  useEffect(() => {
+    if (!isTableOrchestrator) return;
+    if (table.stage === 'waiting' && botConfig.isBotsActive === true && botConfig.autoJoinLeaveEnabled === true) {
       const activeCount = table.players.filter((p) => p !== null).length;
       const targetCount = botConfig.targetTableOccupancy || 4;
 
@@ -236,20 +633,23 @@ export const PokerTable: React.FC<PokerTableProps> = ({
               }
             }
 
-            return {
+            const updatedTable = {
               ...prev,
               players: updated,
             };
+            broadcastTableState(updatedTable);
+            return updatedTable;
           });
         }, 1200);
 
         return () => clearTimeout(spawnTimer);
       }
     }
-  }, [table.stage, table.players, botConfig.isBotsActive, botConfig.autoJoinLeaveEnabled, botConfig.targetTableOccupancy]);
+  }, [table.stage, table.players, botConfig.isBotsActive, botConfig.autoJoinLeaveEnabled, botConfig.targetTableOccupancy, isTableOrchestrator]);
 
-  // When table is waiting and 2+ active players are present, automatically start the hand!
+  // When table is waiting and 2+ active players are present, automatically start the hand! (Orchestrator only)
   useEffect(() => {
+    if (!isTableOrchestrator) return;
     if (table.stage === 'waiting') {
       const activeCount = table.players.filter((p) => p !== null && !p.isSittingOut).length;
       if (activeCount >= 2) {
@@ -259,10 +659,58 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         return () => clearTimeout(startTimer);
       }
     }
-  }, [table.stage, table.players]);
+  }, [table.stage, table.players, isTableOrchestrator]);
 
-  // Handle Bot Turn automatically with human-like 4 to 9 second thinking time & selected Bot Difficulty
+  // Live Turn Countdown Timer & Auto-Timeout Execution
   useEffect(() => {
+    // If the game is not in an active playing street, reset timer
+    if (table.stage === 'showdown' || table.stage === 'hand_ended' || table.stage === 'waiting') {
+      if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+      return;
+    }
+
+    const currentSeat = table.players[table.currentTurnSeatIndex];
+    if (!currentSeat || currentSeat.isFolded || currentSeat.isAllIn || currentSeat.isSittingOut) {
+      if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+      return;
+    }
+
+    // Reset turn countdown time to table timeBank (default 15s)
+    const initialTime = table.timeBank || 15;
+    setTurnTimeLeft(initialTime);
+
+    if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+
+    turnTimerRef.current = setInterval(() => {
+      setTurnTimeLeft((prevTime) => {
+        const nextTime = prevTime - 1;
+
+        // Play warning tick sound for the local human player when time is running out (<= 5s)
+        if (currentSeat.isHuman && currentSeat.id === currentUser.id && nextTime <= 5 && nextTime > 0) {
+          soundManager.playTimerTick();
+        }
+
+        if (nextTime <= 0) {
+          if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+
+          // Only the single authoritative table orchestrator executes the timeout action to prevent race conditions
+          if (isTableOrchestrator) {
+            handleTurnTimeout();
+          }
+          return 0;
+        }
+        return nextTime;
+      });
+    }, 1000);
+
+    return () => {
+      if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+    };
+  }, [table.currentTurnSeatIndex, table.stage, isTableOrchestrator, currentUser.id, table.timeBank]);
+
+  // Handle Bot Turn automatically with human-like 4 to 9 second thinking time & selected Bot Difficulty (Orchestrator only)
+  useEffect(() => {
+    if (!isTableOrchestrator) return;
     if (table.stage === 'showdown' || table.stage === 'hand_ended' || table.stage === 'waiting') return;
 
     const currentSeat = table.players[table.currentTurnSeatIndex];
@@ -304,10 +752,123 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     return () => {
       if (botTurnTimeoutRef.current) clearTimeout(botTurnTimeoutRef.current);
     };
-  }, [table.currentTurnSeatIndex, table.stage, botConfig]);
+  }, [table.currentTurnSeatIndex, table.stage, botConfig, isTableOrchestrator]);
+
+  // Auto-runout community cards when players are all-in and no more bets are possible (Orchestrator only)
+  useEffect(() => {
+    if (!isTableOrchestrator) return;
+    if (table.stage === 'showdown' || table.stage === 'hand_ended' || table.stage === 'waiting') return;
+
+    const nonFolded = table.players.filter((p) => p && !p.isFolded && !p.isSittingOut);
+    if (nonFolded.length < 2) return;
+
+    const canBetPlayers = nonFolded.filter((p) => p && !p.isAllIn && p.chips > 0);
+    const isRoundSettled = nonFolded.every(
+      (p) => p && (p.isAllIn || p.chips === 0 || p.currentBet === table.currentHighBet)
+    );
+
+    // If at most 1 player has chips remaining and current bets are settled, auto-deal next street
+    if (canBetPlayers.length <= 1 && isRoundSettled) {
+      const runoutTimer = setTimeout(() => {
+        setTable((prev) => {
+          if (prev.stage === 'showdown' || prev.stage === 'hand_ended' || prev.stage === 'waiting') return prev;
+          const nextState = advanceStreet(prev);
+          broadcastTableState(nextState);
+          return nextState;
+        });
+      }, 1400);
+
+      return () => clearTimeout(runoutTimer);
+    }
+  }, [table.stage, table.currentHighBet, table.players, isTableOrchestrator]);
+
+  // Helper to immediately refund uncalled bets to larger-stack players
+  const refundUncalledBets = (
+    currentPlayers: (Player | null)[],
+    currentPot: number,
+    currentHighBet: number
+  ): {
+    updatedPlayers: (Player | null)[];
+    updatedPot: number;
+    updatedHighBet: number;
+    refunds: { playerId: string; playerName: string; amount: number }[];
+  } => {
+    const activePlayers = currentPlayers.filter((p): p is Player => p !== null && !p.isFolded);
+    if (activePlayers.length === 0) {
+      return { updatedPlayers: currentPlayers, updatedPot: currentPot, updatedHighBet: currentHighBet, refunds: [] };
+    }
+
+    const refunds: { playerId: string; playerName: string; amount: number }[] = [];
+    let pot = currentPot;
+    let highBet = currentHighBet;
+    let players = [...currentPlayers];
+
+    if (activePlayers.length === 1) {
+      // Single remaining player (all others folded)
+      const sole = activePlayers[0];
+      const foldedPlayers = currentPlayers.filter((p): p is Player => p !== null && p.isFolded);
+      const maxOpponentBet = foldedPlayers.length > 0 ? Math.max(...foldedPlayers.map((p) => p.currentBet)) : 0;
+
+      if (sole.currentBet > maxOpponentBet) {
+        const excess = Number((sole.currentBet - maxOpponentBet).toFixed(2));
+        if (excess > 0) {
+          players = players.map((p) => {
+            if (p && p.id === sole.id) {
+              const newChips = Number((p.chips + excess).toFixed(2));
+              return {
+                ...p,
+                chips: newChips,
+                currentBet: maxOpponentBet,
+                totalRoundBet: Number(Math.max(0, p.totalRoundBet - excess).toFixed(2)),
+                isAllIn: newChips === 0,
+              };
+            }
+            return p;
+          });
+          pot = Number(Math.max(0, pot - excess).toFixed(2));
+          highBet = maxOpponentBet;
+          refunds.push({ playerId: sole.id, playerName: sole.name, amount: excess });
+        }
+      }
+    } else {
+      // 2 or more active players: sort by currentBet descending
+      const sorted = [...activePlayers].sort((a, b) => b.currentBet - a.currentBet);
+      const highest = sorted[0];
+      const secondHighest = sorted[1];
+
+      if (highest.currentBet > secondHighest.currentBet) {
+        const excess = Number((highest.currentBet - secondHighest.currentBet).toFixed(2));
+        if (excess > 0) {
+          players = players.map((p) => {
+            if (p && p.id === highest.id) {
+              const newChips = Number((p.chips + excess).toFixed(2));
+              return {
+                ...p,
+                chips: newChips,
+                currentBet: secondHighest.currentBet,
+                totalRoundBet: Number(Math.max(0, p.totalRoundBet - excess).toFixed(2)),
+                isAllIn: newChips === 0,
+              };
+            }
+            return p;
+          });
+          pot = Number(Math.max(0, pot - excess).toFixed(2));
+          highBet = secondHighest.currentBet;
+          refunds.push({ playerId: highest.id, playerName: highest.name, amount: excess });
+        }
+      }
+    }
+
+    return { updatedPlayers: players, updatedPot: pot, updatedHighBet: highBet, refunds };
+  };
 
   // Execute Action for a Player
-  const executePlayerAction = (seatIndex: number, action: PlayerActionType, amount: number) => {
+  const executePlayerAction = (
+    seatIndex: number, 
+    action: PlayerActionType, 
+    amount: number,
+    isTimeoutAction: boolean = false
+  ) => {
     setTable((prevTable) => {
       const updatedPlayers = [...prevTable.players];
       const player = updatedPlayers[seatIndex];
@@ -318,6 +879,20 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       let newMinRaise = prevTable.minRaise;
       const updatedPlayer: Player = { ...player };
 
+      if (!isTimeoutAction) {
+        // Reset missed turns counter on conscious player action
+        updatedPlayer.consecutiveMissedTurns = 0;
+      } else {
+        // Increment missed turns count on timeout
+        const newMissed = (player.consecutiveMissedTurns || 0) + 1;
+        updatedPlayer.consecutiveMissedTurns = newMissed;
+        if (newMissed >= 3) {
+          updatedPlayer.isSittingOut = true;
+          updatedPlayer.isFolded = true;
+          updatedPlayer.cards = [];
+        }
+      }
+
       if (action === 'fold') {
         updatedPlayer.isFolded = true;
         updatedPlayer.lastAction = { type: 'fold', timestamp: Date.now() };
@@ -325,21 +900,21 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         updatedPlayer.lastAction = { type: 'check', timestamp: Date.now() };
       } else if (action === 'call') {
         const toCall = Math.min(amount, updatedPlayer.chips);
-        updatedPlayer.chips -= toCall;
-        updatedPlayer.currentBet += toCall;
-        updatedPlayer.totalRoundBet += toCall;
-        newPot += toCall;
+        updatedPlayer.chips = Number(Math.max(0, updatedPlayer.chips - toCall).toFixed(2));
+        updatedPlayer.currentBet = Number((updatedPlayer.currentBet + toCall).toFixed(2));
+        updatedPlayer.totalRoundBet = Number((updatedPlayer.totalRoundBet + toCall).toFixed(2));
+        newPot = Number((newPot + toCall).toFixed(2));
         if (updatedPlayer.chips === 0) updatedPlayer.isAllIn = true;
         updatedPlayer.lastAction = { type: 'call', amount: toCall, timestamp: Date.now() };
       } else if (action === 'bet' || action === 'raise') {
         const addedChips = amount - updatedPlayer.currentBet;
         const actualAddition = Math.min(addedChips, updatedPlayer.chips);
-        updatedPlayer.chips -= actualAddition;
-        updatedPlayer.currentBet += actualAddition;
-        updatedPlayer.totalRoundBet += actualAddition;
-        newPot += actualAddition;
+        updatedPlayer.chips = Number(Math.max(0, updatedPlayer.chips - actualAddition).toFixed(2));
+        updatedPlayer.currentBet = Number((updatedPlayer.currentBet + actualAddition).toFixed(2));
+        updatedPlayer.totalRoundBet = Number((updatedPlayer.totalRoundBet + actualAddition).toFixed(2));
+        newPot = Number((newPot + actualAddition).toFixed(2));
         if (updatedPlayer.currentBet > newHighBet) {
-          newMinRaise = updatedPlayer.currentBet - newHighBet;
+          newMinRaise = Number((updatedPlayer.currentBet - newHighBet).toFixed(2));
           newHighBet = updatedPlayer.currentBet;
         }
         if (updatedPlayer.chips === 0) updatedPlayer.isAllIn = true;
@@ -351,11 +926,11 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       } else if (action === 'all_in') {
         const allInChips = updatedPlayer.chips;
         updatedPlayer.chips = 0;
-        updatedPlayer.currentBet += allInChips;
-        updatedPlayer.totalRoundBet += allInChips;
-        newPot += allInChips;
+        updatedPlayer.currentBet = Number((updatedPlayer.currentBet + allInChips).toFixed(2));
+        updatedPlayer.totalRoundBet = Number((updatedPlayer.totalRoundBet + allInChips).toFixed(2));
+        newPot = Number((newPot + allInChips).toFixed(2));
         if (updatedPlayer.currentBet > newHighBet) {
-          newMinRaise = Math.max(prevTable.bigBlind, updatedPlayer.currentBet - newHighBet);
+          newMinRaise = Math.max(prevTable.bigBlind, Number((updatedPlayer.currentBet - newHighBet).toFixed(2)));
           newHighBet = updatedPlayer.currentBet;
         }
         updatedPlayer.isAllIn = true;
@@ -364,106 +939,216 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
       updatedPlayers[seatIndex] = updatedPlayer;
 
+      // 0. Zero-latency instant action broadcast to all connected devices
+      try {
+        emitPlayerActionSocket({
+          tableId: prevTable.id,
+          playerId: player.id,
+          playerName: player.name,
+          avatar: player.avatar,
+          actionType: action,
+          amount: action === 'fold' ? 0 : action === 'check' ? 0 : action === 'call' ? Math.min(amount, player.chips) : amount,
+          seatIndex: seatIndex,
+          chipsRemaining: updatedPlayer.chips,
+          timestamp: Date.now(),
+        });
+      } catch (err) {
+        console.warn('Action socket emit error:', err);
+      }
+
+      // Update real-time HUD action stats for this player
+      const actionLog = currentHandActionTrackingRef.current[player.id];
+      if (actionLog) {
+        if (prevTable.stage === 'preflop') {
+          if (action === 'call' || action === 'bet' || action === 'raise' || action === 'all_in') {
+            actionLog.vpip = true;
+          }
+          if (
+            action === 'raise' ||
+            (action === 'bet' && amount > prevTable.bigBlind) ||
+            (action === 'all_in' && amount > prevTable.currentHighBet)
+          ) {
+            actionLog.pfr = true;
+            actionLog.vpip = true;
+          }
+        } else if (prevTable.stage === 'flop') {
+          actionLog.sawFlop = true;
+          if (action === 'bet') actionLog.flopBets++;
+          else if (action === 'raise') actionLog.flopRaises++;
+          else if (action === 'call') actionLog.flopCalls++;
+          else if (action === 'check') actionLog.flopChecks++;
+          else if (action === 'all_in') {
+            if (amount > prevTable.currentHighBet) actionLog.flopRaises++;
+            else actionLog.flopCalls++;
+          }
+        } else if (prevTable.stage === 'turn') {
+          actionLog.sawTurn = true;
+          if (action === 'bet') actionLog.turnBets++;
+          else if (action === 'raise') actionLog.turnRaises++;
+          else if (action === 'call') actionLog.turnCalls++;
+          else if (action === 'check') actionLog.turnChecks++;
+          else if (action === 'all_in') {
+            if (amount > prevTable.currentHighBet) actionLog.turnRaises++;
+            else actionLog.turnCalls++;
+          }
+        } else if (prevTable.stage === 'river') {
+          actionLog.sawRiver = true;
+          if (action === 'bet') actionLog.riverBets++;
+          else if (action === 'raise') actionLog.riverRaises++;
+          else if (action === 'call') actionLog.riverCalls++;
+          else if (action === 'check') actionLog.riverChecks++;
+          else if (action === 'all_in') {
+            if (amount > prevTable.currentHighBet) actionLog.riverRaises++;
+            else actionLog.riverCalls++;
+          }
+        }
+      }
+
+      let nextResult: PokerTableState;
+
       // Check if only 1 active player remains (everyone else folded)
       const remainingUnfolded = updatedPlayers.filter((p) => p && !p.isFolded);
       if (remainingUnfolded.length === 1 && remainingUnfolded[0]) {
-        return endHandWithSoleWinner(prevTable, updatedPlayers, remainingUnfolded[0], newPot);
+        nextResult = endHandWithSoleWinner(prevTable, updatedPlayers, remainingUnfolded[0], newPot);
+      } else {
+        // Check if betting round is complete
+        const nonFolded = updatedPlayers.filter((p): p is Player => p !== null && !p.isFolded && !p.isSittingOut);
+        
+        // Every non-folded player must have matched newHighBet and acted, or be all-in
+        const allMatchedOrAllIn = nonFolded.every(
+          (p) => (p.currentBet === newHighBet && p.lastAction !== undefined) || p.isAllIn || p.chips === 0
+        );
+        // Is there any non-folded player with chips who has not yet matched the highest bet?
+        const hasUncalledBet = nonFolded.some(
+          (p) => !p.isAllIn && p.chips > 0 && p.currentBet < newHighBet
+        );
+
+        const isRoundDone = allMatchedOrAllIn && !hasUncalledBet;
+
+        if (isRoundDone) {
+          // Process uncalled bet refunds before advancing street
+          const refundRes = refundUncalledBets(updatedPlayers, newPot, newHighBet);
+          if (refundRes.refunds.length > 0) {
+            soundManager.playChipSound();
+            refundRes.refunds.forEach((r) => {
+              const refundText = lang === 'az'
+                ? `💰 ${r.playerName} üçün $${r.amount.toFixed(2)} çağırılmamış mərc dərhal balansına qaytarıldı.`
+                : `💰 Uncalled bet of $${r.amount.toFixed(2)} returned immediately to ${r.playerName}.`;
+              const refundMsg: ChatMessage = {
+                id: `sys_refund_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                tableId: prevTable.id,
+                senderId: 'system',
+                senderName: 'Dealer',
+                senderAvatar: '',
+                text: refundText,
+                message: refundText,
+                timestamp: Date.now(),
+                isSystem: true,
+              };
+              setChatMessages((prev) => [...prev, refundMsg]);
+              sendTableChatMessage(prevTable.id, refundMsg);
+            });
+          }
+
+          // Advance street
+          nextResult = advanceStreet({
+            ...prevTable,
+            pot: refundRes.updatedPot,
+            currentHighBet: refundRes.updatedHighBet,
+            minRaise: newMinRaise,
+            players: refundRes.updatedPlayers,
+          });
+        } else {
+          // Find next player who can act (not folded, not all-in, has chips)
+          const nextSeat = getNextActiveSeat(updatedPlayers, seatIndex);
+          nextResult = {
+            ...prevTable,
+            pot: newPot,
+            currentHighBet: newHighBet,
+            minRaise: newMinRaise,
+            players: updatedPlayers,
+            currentTurnSeatIndex: nextSeat,
+          };
+        }
       }
 
-      // Check if betting round is complete
-      const activePlayers = updatedPlayers.filter((p) => p && !p.isFolded && !p.isAllIn);
-      const isRoundDone = updatedPlayers.every((p) => {
-        if (!p || p.isFolded || p.isAllIn) return true;
-        return p.currentBet === newHighBet && p.lastAction !== undefined;
-      });
-
-      if (isRoundDone || activePlayers.length <= 1) {
-        // Advance street
-        return advanceStreet({
-          ...prevTable,
-          pot: newPot,
-          currentHighBet: newHighBet,
-          minRaise: newMinRaise,
-          players: updatedPlayers,
-        });
-      }
-
-      // Find next player to act
-      const nextSeat = getNextActiveSeat(updatedPlayers, seatIndex);
-
-      return {
-        ...prevTable,
-        pot: newPot,
-        currentHighBet: newHighBet,
-        minRaise: newMinRaise,
-        players: updatedPlayers,
-        currentTurnSeatIndex: nextSeat,
-      };
+      broadcastTableState(nextResult);
+      return nextResult;
     });
   };
 
-  // Find next active seat
+  // Find next active seat (player who can make an action)
   const getNextActiveSeat = (players: (Player | null)[], fromSeat: number): number => {
     const totalSeats = players.length;
     for (let i = 1; i <= totalSeats; i++) {
       const idx = (fromSeat + i) % totalSeats;
       const p = players[idx];
-      if (p && !p.isFolded && !p.isAllIn && !p.isSittingOut) {
+      if (p && !p.isFolded && !p.isAllIn && !p.isSittingOut && p.chips > 0) {
         return idx;
       }
     }
     return fromSeat;
   };
 
-  // Turn Timeout (Auto Check/Fold & Sit Out)
+  // Turn Timeout (Auto Check/Fold & Sit Out after 3 consecutive missed turns)
   const handleTurnTimeout = () => {
     const currentSeat = table.players[table.currentTurnSeatIndex];
     if (!currentSeat) return;
 
     const toCall = table.currentHighBet - currentSeat.currentBet;
-    if (toCall === 0) {
-      executePlayerAction(currentSeat.seatIndex, 'check', 0);
-    } else {
-      executePlayerAction(currentSeat.seatIndex, 'fold', 0);
+    const actionToTake: PlayerActionType = toCall === 0 ? 'check' : 'fold';
+    const missedTurns = (currentSeat.consecutiveMissedTurns || 0) + 1;
 
-      // Auto fold on timeout and mark as sitting out (masadan kənar)
-      setTable((prev) => {
-        const updatedPlayers = [...prev.players];
-        const p = updatedPlayers[currentSeat.seatIndex];
-        if (p) {
-          updatedPlayers[currentSeat.seatIndex] = {
-            ...p,
-            isSittingOut: true,
-            isFolded: true,
-            cards: [],
-          };
-        }
-        return { ...prev, players: updatedPlayers };
-      });
+    // Execute the action with isTimeoutAction = true to register the missed turn
+    executePlayerAction(currentSeat.seatIndex, actionToTake, 0, true);
 
+    if (missedTurns >= 3) {
       if (currentSeat.isHuman) {
         setSitOutNextHand(true);
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `sys_${Date.now()}`,
-            senderName: 'Dealer',
-            senderAvatar: '',
-            text: lang === 'az'
-              ? 'Vaxtınız bitdiyi üçün əliniz pasa atıldı və masadan kənara keçirildiniz.'
-              : 'Time expired. You folded and are now sitting out.',
-            timestamp: Date.now(),
-            isSystem: true,
-          },
-        ]);
       }
+      const sitOutText = lang === 'az'
+        ? `⚠️ ${currentSeat.name} 3 ardıcıl gedişi qaçırdığı üçün masanın durğunluğunun qarşısını almaq məqsədilə avtomatik "Masadan Kənarda" (Sitting Out) statusuna keçirildi.`
+        : `⚠️ ${currentSeat.name} missed 3 consecutive turns and was automatically transitioned to 'Sitting Out' to prevent table stagnation.`;
+      const sitOutMsg: ChatMessage = {
+        id: `sys_sitout_${Date.now()}`,
+        tableId: table.id,
+        senderId: 'system',
+        senderName: 'Dealer',
+        senderAvatar: '',
+        text: sitOutText,
+        message: sitOutText,
+        timestamp: Date.now(),
+        isSystem: true,
+      };
+      setChatMessages((prev) => [...prev, sitOutMsg]);
+      sendTableChatMessage(table.id, sitOutMsg);
+    } else {
+      const warnText = lang === 'az'
+        ? `⏱️ ${currentSeat.name} vaxtı bitdi: Avtomatik ${actionToTake === 'check' ? 'Check' : 'Fold'} edildi (Qaçırılan gediş: ${missedTurns}/3). 3 ardıcıl qaçırılsa Masadan Kənar olacaqsınız.`
+        : `⏱️ ${currentSeat.name} time expired: Auto-${actionToTake === 'check' ? 'Check' : 'Fold'} (Missed turns: ${missedTurns}/3). Missing 3 in a row transitions to Sitting Out.`;
+      const warnMsg: ChatMessage = {
+        id: `sys_warn_timeout_${Date.now()}`,
+        tableId: table.id,
+        senderId: 'system',
+        senderName: 'Dealer',
+        senderAvatar: '',
+        text: warnText,
+        message: warnText,
+        timestamp: Date.now(),
+        isSystem: true,
+      };
+      setChatMessages((prev) => [...prev, warnMsg]);
+      sendTableChatMessage(table.id, warnMsg);
     }
   };
 
   // Advance street (Preflop -> Flop -> Turn -> River -> Showdown)
   const advanceStreet = (currentState: PokerTableState): PokerTableState => {
+    // Process any uncalled bet refunds first
+    const refundRes = refundUncalledBets(currentState.players, currentState.pot, currentState.currentHighBet);
+
     // Reset current round bets for next street
-    const resetPlayers = currentState.players.map((p) =>
+    const resetPlayers = refundRes.updatedPlayers.map((p) =>
       p ? { ...p, currentBet: 0, lastAction: undefined } : null
     );
 
@@ -476,21 +1161,45 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       soundManager.playCardDeal();
       // Deal 3 flop cards
       newCommunity.push(deck.pop()!, deck.pop()!, deck.pop()!);
+      // Mark sawFlop for all non-folded players in tracking logs
+      for (const p of resetPlayers) {
+        if (p && !p.isFolded && currentHandActionTrackingRef.current[p.id]) {
+          currentHandActionTrackingRef.current[p.id].sawFlop = true;
+        }
+      }
     } else if (currentState.stage === 'flop') {
       nextStage = 'turn';
       soundManager.playCardDeal();
       // Deal 1 turn card
       newCommunity.push(deck.pop()!);
+      // Mark sawTurn for active players
+      for (const p of resetPlayers) {
+        if (p && !p.isFolded && currentHandActionTrackingRef.current[p.id]) {
+          currentHandActionTrackingRef.current[p.id].sawTurn = true;
+        }
+      }
     } else if (currentState.stage === 'turn') {
       nextStage = 'river';
       soundManager.playCardDeal();
       // Deal 1 river card
       newCommunity.push(deck.pop()!);
+      // Mark sawRiver for active players
+      for (const p of resetPlayers) {
+        if (p && !p.isFolded && currentHandActionTrackingRef.current[p.id]) {
+          currentHandActionTrackingRef.current[p.id].sawRiver = true;
+        }
+      }
     } else if (currentState.stage === 'river') {
       nextStage = 'showdown';
+      for (const p of resetPlayers) {
+        if (p && !p.isFolded && currentHandActionTrackingRef.current[p.id]) {
+          currentHandActionTrackingRef.current[p.id].sawShowdown = true;
+        }
+      }
       return resolveShowdown({
         ...currentState,
         stage: 'showdown',
+        pot: refundRes.updatedPot,
         players: resetPlayers,
         communityCards: newCommunity,
         currentHighBet: 0,
@@ -503,6 +1212,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     return {
       ...currentState,
       stage: nextStage,
+      pot: refundRes.updatedPot,
       players: resetPlayers,
       communityCards: newCommunity,
       deck,
@@ -515,6 +1225,8 @@ export const PokerTable: React.FC<PokerTableProps> = ({
   // Resolve Showdown with Hand Evaluator & Side Pots
   const resolveShowdown = (finalState: PokerTableState): PokerTableState => {
     soundManager.playWinSound();
+
+    // 1. Evaluate hand strength score for every contender
     const activeContenders = finalState.players
       .filter((p): p is Player => p !== null && !p.isFolded)
       .map((p) => {
@@ -527,107 +1239,181 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         };
       });
 
-    // Sort by hand strength score descending
-    activeContenders.sort((a, b) => (b.handRankScore || 0) - (a.handRankScore || 0));
-    const bestScore = activeContenders[0]?.handRankScore || 0;
-    const winners = activeContenders.filter((c) => c.handRankScore === bestScore);
+    // 2. Calculate Side Pots based on players' totalRoundBet
+    const allPlayersInHand = finalState.players.filter((p): p is Player => p !== null);
+    const sidePots = calculateSidePots(allPlayersInHand);
 
-    // Calculate 10% Masa Faizi (Table Rake) & Net Pot
-    const totalPot = finalState.pot;
-    const rakePercent = 10;
-    const rakeAmount = Number((totalPot * 0.10).toFixed(2));
-    const netPot = Number(Math.max(0, totalPot - rakeAmount).toFixed(2));
-    const winShare = Number((netPot / (winners.length || 1)).toFixed(2));
+    let totalRakeCollected = 0;
+    let totalNetDistributed = 0;
+    const playerWinAmounts = new Map<string, number>();
+    const winningPlayersList: Player[] = [];
+
+    if (sidePots.length === 0) {
+      // Fallback if no side pots found (equal distribution of main pot)
+      activeContenders.sort((a, b) => (b.handRankScore || 0) - (a.handRankScore || 0));
+      const bestScore = activeContenders[0]?.handRankScore || 0;
+      const winners = activeContenders.filter((c) => c.handRankScore === bestScore);
+      const totalPot = finalState.pot;
+      const rakeAmount = Number((totalPot * 0.10).toFixed(2));
+      const netPot = Number(Math.max(0, totalPot - rakeAmount).toFixed(2));
+      const winShare = Number((netPot / (winners.length || 1)).toFixed(2));
+
+      totalRakeCollected = rakeAmount;
+      totalNetDistributed = netPot;
+      winners.forEach((w) => {
+        playerWinAmounts.set(w.id, winShare);
+        winningPlayersList.push(w);
+      });
+    } else {
+      // Distribute each side pot / main pot slice to the best eligible contender(s)
+      for (const potSlice of sidePots) {
+        const eligibleContenders = activeContenders.filter((c) =>
+          potSlice.eligiblePlayerIds.includes(c.id)
+        );
+
+        if (eligibleContenders.length === 0) continue;
+
+        // If only 1 contender is eligible for this slice (e.g. uncalled bet portion), refund 100% with 0% rake
+        if (eligibleContenders.length === 1) {
+          const sole = eligibleContenders[0];
+          const curr = playerWinAmounts.get(sole.id) || 0;
+          playerWinAmounts.set(sole.id, Number((curr + potSlice.amount).toFixed(2)));
+          if (!winningPlayersList.some((w) => w.id === sole.id)) {
+            winningPlayersList.push(sole);
+          }
+          totalNetDistributed += potSlice.amount;
+          continue;
+        }
+
+        // 2 or more eligible contenders: find best hand among them
+        eligibleContenders.sort((a, b) => (b.handRankScore || 0) - (a.handRankScore || 0));
+        const bestScore = eligibleContenders[0].handRankScore || 0;
+        const potWinners = eligibleContenders.filter((c) => c.handRankScore === bestScore);
+
+        const potRake = Number((potSlice.amount * 0.10).toFixed(2));
+        const potNet = Number(Math.max(0, potSlice.amount - potRake).toFixed(2));
+        const share = Number((potNet / (potWinners.length || 1)).toFixed(2));
+
+        totalRakeCollected = Number((totalRakeCollected + potRake).toFixed(2));
+        totalNetDistributed = Number((totalNetDistributed + potNet).toFixed(2));
+
+        potWinners.forEach((w) => {
+          const curr = playerWinAmounts.get(w.id) || 0;
+          playerWinAmounts.set(w.id, Number((curr + share).toFixed(2)));
+          if (!winningPlayersList.some((p) => p.id === w.id)) {
+            winningPlayersList.push(w);
+          }
+        });
+      }
+    }
 
     const updatedPlayers = finalState.players.map((p) => {
       if (!p) return null;
-      const isWin = winners.some((w) => w.id === p.id);
+      const winAmt = playerWinAmounts.get(p.id) || 0;
+      const isWin = winAmt > 0;
       const evaluated = activeContenders.find((c) => c.id === p.id);
       return {
         ...p,
-        chips: isWin ? Number((p.chips + winShare).toFixed(2)) : p.chips,
+        chips: isWin ? Number((p.chips + winAmt).toFixed(2)) : p.chips,
         isWinner: isWin,
-        winAmount: isWin ? winShare : 0,
+        winAmount: isWin ? winAmt : 0,
         handRankName: evaluated?.handRankName,
         bestFiveCards: evaluated?.bestFiveCards,
       };
     });
 
-    const winningCards = winners[0]?.bestFiveCards || [];
-    const winnerNames = winners.map((w) => w.name).join(' & ');
-    const winnerHandName = winners[0]?.handRankName || 'High Card';
+    const winningCards = winningPlayersList[0]?.bestFiveCards || [];
+    const winnerNames = winningPlayersList.map((w) => w.name).join(' & ');
+    const winnerHandName = winningPlayersList[0]?.handRankName || 'High Card';
 
     setWinnerBanner({
       name: winnerNames,
-      amount: netPot,
-      totalPot,
-      rakeAmount,
+      amount: totalNetDistributed,
+      totalPot: finalState.pot,
+      rakeAmount: totalRakeCollected,
       handName: winnerHandName,
     });
 
-    // Record 10% Table Rake to Firestore & Admin Panel System
-    if (rakeAmount > 0) {
+    // Record Table Rake to Firestore & Admin Panel System
+    if (totalRakeCollected > 0) {
       recordTableRake({
         tableId: finalState.id,
         tableName: finalState.name,
         gameType: finalState.gameType,
         handNumber: finalState.handNumber,
-        totalPot,
+        totalPot: finalState.pot,
         rakePercent: 10,
-        rakeAmount,
-        netPotWon: netPot,
+        rakeAmount: totalRakeCollected,
+        netPotWon: totalNetDistributed,
         winnerName: winnerNames,
-        winnerAvatar: winners[0]?.avatar,
+        winnerAvatar: winningPlayersList[0]?.avatar,
         timestamp: Date.now(),
       });
     }
 
-    if (winners.some((w) => w.isHuman)) {
+    if (winningPlayersList.some((w) => w.isHuman)) {
       confetti({ particleCount: 80, spread: 90, origin: { y: 0.5 } });
-      // In-table winnings accumulate in player.chips and are returned to the proper balance upon table exit
     }
 
-    // Save to Hand History
+    // Compile and finalize player action logs for the session stats
+    const finalLogs: Record<string, PlayerHandActionLog> = { ...currentHandActionTrackingRef.current };
+    for (const p of finalState.players) {
+      if (!p) continue;
+      const log = finalLogs[p.id];
+      if (log) {
+        const winAmt = playerWinAmounts.get(p.id) || 0;
+        log.invested = p.totalRoundBet;
+        log.wonAmount = winAmt;
+        log.profit = Number((winAmt - p.totalRoundBet).toFixed(2));
+        log.isWinner = winAmt > 0;
+        log.cards = p.cards;
+      }
+    }
+
+    // Save to Hand History with full player action logs
     const historyEntry: HandHistoryRecord = {
-      id: `h_${Date.now()}`,
+      id: `h_${Date.now()}_${finalState.handNumber}`,
       handNumber: finalState.handNumber,
       tableName: finalState.name,
       gameType: finalState.gameType,
       blinds: `$${finalState.smallBlind}/$${finalState.bigBlind}`,
-      pot: totalPot,
-      rake: rakeAmount,
-      netPot: netPot,
+      pot: finalState.pot,
+      rake: totalRakeCollected,
+      netPot: totalNetDistributed,
       communityCards: finalState.communityCards,
-      winners: winners.map((w) => ({
+      winners: winningPlayersList.map((w) => ({
         name: w.name,
         avatar: w.avatar,
-        amount: winShare,
-        handName: winnerHandName,
+        amount: playerWinAmounts.get(w.id) || 0,
+        handName: w.handRankName || winnerHandName,
         cards: w.cards,
       })),
       playerCards: humanPlayer ? humanPlayer.cards : [],
-      playerProfit: winners.some((w) => w.isHuman)
-        ? winShare - (humanPlayer?.totalRoundBet || 0)
-        : -(humanPlayer?.totalRoundBet || 0),
+      playerProfit: winningPlayersList.some((w) => w.isHuman)
+        ? Number(((playerWinAmounts.get(currentUser.id) || 0) - (humanPlayer?.totalRoundBet || 0)).toFixed(2))
+        : Number((-(humanPlayer?.totalRoundBet || 0)).toFixed(2)),
+      playerActionLogs: finalLogs,
       timestamp: Date.now(),
     };
-    setHandHistory((prev) => [historyEntry, ...prev.slice(0, 19)]);
+    setHandHistory((prev) => [historyEntry, ...prev.slice(0, 49)]);
 
-    // Schedule next hand in 4 seconds
-    if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
-    nextHandTimeoutRef.current = setTimeout(() => {
-      startNextHand();
-    }, 4000);
+    // Schedule next hand in 4 seconds (Orchestrator only)
+    if (isTableOrchestrator) {
+      if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
+      nextHandTimeoutRef.current = setTimeout(() => {
+        startNextHand();
+      }, 4000);
+    }
 
     return {
       ...finalState,
       stage: 'hand_ended',
       players: updatedPlayers,
-      handWinners: winners.map((w) => ({
+      handWinners: winningPlayersList.map((w) => ({
         playerId: w.id,
-        amount: winShare,
-        handName: winnerHandName,
-        winningCards,
+        amount: playerWinAmounts.get(w.id) || 0,
+        handName: w.handRankName || winnerHandName,
+        winningCards: w.bestFiveCards || winningCards,
       })),
     };
   };
@@ -641,13 +1427,16 @@ export const PokerTable: React.FC<PokerTableProps> = ({
   ): PokerTableState => {
     soundManager.playWinSound();
 
-    // Calculate 10% Table Rake & Net Pot
-    const totalPot = finalPot;
-    const rakePercent = 10;
-    const rakeAmount = Number((totalPot * 0.10).toFixed(2));
-    const netPot = Number(Math.max(0, totalPot - rakeAmount).toFixed(2));
+    // 1. Process uncalled bet refunds if the sole winner bet more than any folded opponent
+    const refundRes = refundUncalledBets(players, finalPot, prevTable.currentHighBet);
+    const contestedPot = refundRes.updatedPot;
 
-    const updatedPlayers = players.map((p) => {
+    // Calculate 10% Table Rake on contested pot only & Net Pot
+    const rakePercent = 10;
+    const rakeAmount = Number((contestedPot * 0.10).toFixed(2));
+    const netPot = Number(Math.max(0, contestedPot - rakeAmount).toFixed(2));
+
+    const updatedPlayers = refundRes.updatedPlayers.map((p) => {
       if (!p) return null;
       if (p.id === winner.id) {
         return {
@@ -663,7 +1452,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
     setWinnerBanner({
       name: winner.name,
       amount: netPot,
-      totalPot,
+      totalPot: contestedPot,
       rakeAmount,
       handName: lang === 'az' ? 'Rəqiblər fold etdi' : 'Everyone folded',
     });
@@ -675,7 +1464,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         tableName: prevTable.name,
         gameType: prevTable.gameType,
         handNumber: prevTable.handNumber,
-        totalPot,
+        totalPot: contestedPot,
         rakePercent: 10,
         rakeAmount,
         netPotWon: netPot,
@@ -685,20 +1474,66 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       });
     }
 
-    if (winner.isHuman) {
+    if (winner.id === currentUser.id) {
       confetti({ particleCount: 50, spread: 70, origin: { y: 0.5 } });
-      // In-table winnings accumulate in player.chips and are returned to the proper balance upon table exit
     }
 
-    // Schedule next hand in 4 seconds
-    if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
-    nextHandTimeoutRef.current = setTimeout(() => {
-      startNextHand();
-    }, 4000);
+    // Compile and finalize player action logs for the foldout hand
+    const finalLogs: Record<string, PlayerHandActionLog> = { ...currentHandActionTrackingRef.current };
+    for (const p of players) {
+      if (!p) continue;
+      const log = finalLogs[p.id];
+      if (log) {
+        const isWin = p.id === winner.id;
+        const winAmt = isWin ? netPot : 0;
+        log.invested = p.totalRoundBet;
+        log.wonAmount = winAmt;
+        log.profit = Number((winAmt - p.totalRoundBet).toFixed(2));
+        log.isWinner = isWin;
+        log.cards = p.cards;
+      }
+    }
+
+    // Save to Hand History with full player action logs
+    const historyEntry: HandHistoryRecord = {
+      id: `h_${Date.now()}_${prevTable.handNumber}`,
+      handNumber: prevTable.handNumber,
+      tableName: prevTable.name,
+      gameType: prevTable.gameType,
+      blinds: `$${prevTable.smallBlind}/$${prevTable.bigBlind}`,
+      pot: contestedPot,
+      rake: rakeAmount,
+      netPot,
+      communityCards: prevTable.communityCards,
+      winners: [
+        {
+          name: winner.name,
+          avatar: winner.avatar,
+          amount: netPot,
+          handName: lang === 'az' ? 'Rəqiblər fold etdi' : 'Everyone folded',
+          cards: winner.cards,
+        },
+      ],
+      playerCards: humanPlayer ? humanPlayer.cards : [],
+      playerProfit: winner.id === currentUser.id
+        ? Number((netPot - (humanPlayer?.totalRoundBet || 0)).toFixed(2))
+        : Number((-(humanPlayer?.totalRoundBet || 0)).toFixed(2)),
+      playerActionLogs: finalLogs,
+      timestamp: Date.now(),
+    };
+    setHandHistory((prev) => [historyEntry, ...prev.slice(0, 49)]);
+
+    // Schedule next hand in 4 seconds (Orchestrator only)
+    if (isTableOrchestrator) {
+      if (nextHandTimeoutRef.current) clearTimeout(nextHandTimeoutRef.current);
+      nextHandTimeoutRef.current = setTimeout(() => {
+        startNextHand();
+      }, 4000);
+    }
 
     return {
       ...prevTable,
-      pot: finalPot,
+      pot: contestedPot,
       stage: 'hand_ended',
       players: updatedPlayers,
       handWinners: [
@@ -733,13 +1568,64 @@ export const PokerTable: React.FC<PokerTableProps> = ({
           continue;
         }
 
-        // Human Player Chip Check: If chips ran out (< smallBlind), auto remove from table seat!
+        // Human Player Chip Check: Auto-Rebuy if chips drop below 20 BBs & Eject if balance depleted
         if (p.isHuman) {
+          // Auto-Rebuy Feature: replenish to starting buy-in amount if chips drop below 20 Big Blinds
+          if (p.id === currentUser.id && autoRebuy && p.chips < prevTable.bigBlind * 20 && !p.isSittingOut && !sitOutNextHand) {
+            const targetStartingChips = p.initialChips && p.initialChips > 0 ? p.initialChips : prevTable.bigBlind * 50;
+            const boundedTarget = Math.min(prevTable.maxBuyIn, Math.max(prevTable.minBuyIn, targetStartingChips));
+            const neededChips = Number((boundedTarget - p.chips).toFixed(2));
+
+            if (neededChips > 0) {
+              const isBonus = isPlayerUsingBonus;
+              const sourceBalance = isBonus ? userBonusBalance : userRealBalance;
+
+              if (sourceBalance > 0) {
+                const reloadAmount = Number(Math.min(neededChips, sourceBalance).toFixed(2));
+                if (reloadAmount > 0) {
+                  let newBonus = userBonusBalance;
+                  let newReal = userRealBalance;
+
+                  if (isBonus) {
+                    newBonus = Number(Math.max(0, newBonus - reloadAmount).toFixed(2));
+                  } else {
+                    newReal = Number(Math.max(0, newReal - reloadAmount).toFixed(2));
+                  }
+
+                  onUpdateUserBalance(newReal, currentUser.playMoneyBalance, newBonus);
+                  p.chips = Number((p.chips + reloadAmount).toFixed(2));
+                  soundManager.playChipSound();
+
+                  messagesToAdd.push(
+                    lang === 'az'
+                      ? `🔄 Auto-Rebuy: Çipləriniz 20 BB-dən aşağı düşdüyü üçün masaya +$${reloadAmount.toFixed(2)} əlavə olundu (Cari çiplər: $${p.chips.toFixed(2)}).`
+                      : `🔄 Auto-Rebuy: Chips dropped below 20 BB, replenished +$${reloadAmount.toFixed(2)} back to starting buy-in (Total chips: $${p.chips.toFixed(2)}).`
+                  );
+                }
+              }
+            }
+          }
+
           if (p.chips < prevTable.smallBlind || p.chips <= 0) {
+            if (p.id === currentUser.id && p.chips > 0) {
+              if (isPlayerUsingBonus) {
+                onUpdateUserBalance(
+                  currentUser.realBalance,
+                  currentUser.playMoneyBalance,
+                  Number(((currentUser.bonusBalance || 0) + p.chips).toFixed(2))
+                );
+              } else {
+                onUpdateUserBalance(
+                  Number((currentUser.realBalance + p.chips).toFixed(2)),
+                  currentUser.playMoneyBalance,
+                  currentUser.bonusBalance
+                );
+              }
+            }
             messagesToAdd.push(
               lang === 'az'
-                ? `⚠️ Masadakı bütün çipləriniz bitdi! Masadan avtomatik çıxarıldınız.`
-                : `⚠️ All your table chips have run out! You were automatically removed from the seat.`
+                ? `⚠️ Masadakı bütün çipləriniz bitdi ($0.00)! Masadan avtomatik çıxarıldınız.`
+                : `⚠️ All your table chips have run out ($0.00)! You were automatically removed from the seat.`
             );
             soundManager.playFoldSound();
             candidatePlayers.push(null);
@@ -751,7 +1637,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
         // Bot Checks:
         // 0. Master Deactivation Check: If bots are deactivated globally by admin, remove all bots immediately!
-        if (botConfig.isBotsActive === false) {
+        if (botConfig.isBotsActive !== true) {
           candidatePlayers.push(null);
           continue;
         }
@@ -810,7 +1696,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
       }
 
       // Dynamically auto-fill empty seats with new AI Bots if occupancy drops below target AND bots are active
-      if (botConfig.isBotsActive !== false && botConfig.autoJoinLeaveEnabled) {
+      if (botConfig.isBotsActive === true && botConfig.autoJoinLeaveEnabled === true) {
         const targetCount = botConfig.targetTableOccupancy || 4;
         let currentOccupancy = candidatePlayers.filter((p) => p !== null).length;
         if (currentOccupancy < targetCount) {
@@ -953,7 +1839,46 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
       const initialPot = Number((sbAmount + bbAmount).toFixed(2));
 
-      return {
+      // Initialize real-time player action tracking logs for this new hand
+      const newHandLogs: Record<string, PlayerHandActionLog> = {};
+      newPlayers.forEach((p, idx) => {
+        if (!p || p.isSittingOut) return;
+        newHandLogs[p.id] = {
+          playerId: p.id,
+          playerName: p.name,
+          avatar: p.avatar,
+          isHuman: p.isHuman,
+          seatIndex: idx,
+          isSmallBlind: idx === sbSeat,
+          isBigBlind: idx === bbSeat,
+          vpip: false,
+          pfr: false,
+          flopBets: 0,
+          flopRaises: 0,
+          flopCalls: 0,
+          flopChecks: 0,
+          turnBets: 0,
+          turnRaises: 0,
+          turnCalls: 0,
+          turnChecks: 0,
+          riverBets: 0,
+          riverRaises: 0,
+          riverCalls: 0,
+          riverChecks: 0,
+          sawFlop: false,
+          sawTurn: false,
+          sawRiver: false,
+          sawShowdown: false,
+          invested: p.currentBet || 0,
+          wonAmount: 0,
+          profit: 0,
+          isWinner: false,
+          cards: p.cards,
+        };
+      });
+      currentHandActionTrackingRef.current = newHandLogs;
+
+      const newHandState: PokerTableState = {
         ...prevTable,
         stage: 'preflop',
         pot: initialPot,
@@ -970,6 +1895,9 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         players: newPlayers,
         handWinners: [],
       };
+
+      broadcastTableState(newHandState);
+      return newHandState;
     });
   };
 
@@ -985,24 +1913,31 @@ export const PokerTable: React.FC<PokerTableProps> = ({
           players[humanSeatIndex] = {
             ...p,
             isSittingOut: false,
+            consecutiveMissedTurns: 0,
           };
         }
-        return { ...prev, players };
+        const updated = { ...prev, players };
+        broadcastTableState(updated);
+        return updated;
       });
 
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: `sys_${Date.now()}`,
-          senderName: 'System',
-          senderAvatar: '',
-          text: lang === 'az'
-            ? 'Masaya yenidən qatıldınız! Növbəti əldə oyuna davam edəcəksiniz.'
-            : 'You have rejoined the table! You will receive cards on the next deal.',
-          timestamp: Date.now(),
-          isSystem: true,
-        },
-      ]);
+      const rejoinText = lang === 'az'
+        ? '✅ Masaya yenidən qatıldınız! Növbəti əldə kartlar paylanacaq.'
+        : '✅ You have rejoined the table! You will receive cards on the next deal.';
+      const rejoinMsg: ChatMessage = {
+        id: `sys_rejoin_${Date.now()}`,
+        tableId: table.id,
+        senderId: 'system',
+        senderName: 'Dealer',
+        senderAvatar: '',
+        text: rejoinText,
+        message: rejoinText,
+        timestamp: Date.now(),
+        isSystem: true,
+      };
+      setChatMessages((prev) => [...prev, rejoinMsg]);
+      sendTableChatMessageSocket(table.id, rejoinMsg);
+      sendTableChatMessage(table.id, rejoinMsg);
     }
   };
 
@@ -1138,108 +2073,231 @@ export const PokerTable: React.FC<PokerTableProps> = ({
         isDisconnected: false,
         isHuman: true,
         seatIndex: selectedSeatIndex,
-        vipLevel: currentUser.vipLevel,
+        vipLevel: currentUser.vipLevel || 1,
+        vipXp: currentUser.vipXp || 0,
+        selectedAvatarFrame: currentUser.selectedAvatarFrame || 'default',
         joinedAt: Date.now(),
       };
       updatedPlayers[selectedSeatIndex] = newHumanPlayer;
 
-      return {
+      const updated = {
         ...prev,
         players: updatedPlayers,
       };
+      broadcastTableState(updated);
+      joinTableSeatInFirestoreAtomic(prev.id, selectedSeatIndex, newHumanPlayer, updated);
+      return updated;
     });
 
     setShowBuyInModal(false);
 
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        id: `sys_seat_${Date.now()}`,
-        senderName: 'System',
-        senderAvatar: '',
-        text: isMidHand
-          ? (lang === 'az'
-              ? `🎉 Masaya uğurla oturdunuz ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})! Cari əl bitdikdən dərhal sonra növbəti ələ daxil olacaqsınız.`
-              : `🎉 Seated successfully ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})! You will receive cards immediately after this hand ends.`)
-          : (lang === 'az'
-              ? `🎉 Masaya uğurla oturdunuz ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})! Oyun başlayır.`
-              : `🎉 Seated successfully ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})! Game starts.`),
-        timestamp: Date.now(),
-        isSystem: true,
-      },
-    ]);
+    const seatText = isMidHand
+      ? (lang === 'az'
+          ? `🎉 ${currentUser.username} masaya oturdu ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})!`
+          : `🎉 ${currentUser.username} sat down ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})!`)
+      : (lang === 'az'
+          ? `🎉 ${currentUser.username} masaya oturdu ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})! Oyun başlayır.`
+          : `🎉 ${currentUser.username} sat down ($${buyInAmount.toLocaleString()} ${isBonusFunding ? 'Bonus' : 'Real'})! Game starts.`);
+
+    const seatMessage: ChatMessage = {
+      id: `sys_seat_${Date.now()}`,
+      tableId: table.id,
+      senderId: currentUser.id || 'system',
+      senderName: 'System',
+      senderAvatar: '',
+      text: seatText,
+      message: seatText,
+      timestamp: Date.now(),
+      isSystem: true,
+    };
+
+    setChatMessages((prev) => [...prev, seatMessage]);
+    sendTableChatMessageSocket(table.id, seatMessage);
+    sendTableChatMessage(table.id, seatMessage);
   };
 
-  // Exit Table & Cash Out remaining chips to balance
+  // Exit Table & Cash Out remaining chips to real/bonus balance
   const handleExitTable = () => {
     soundManager.playButtonClick();
-    if (humanPlayer && humanPlayer.chips > 0) {
+
+    const playerToExit = table.players.find((p) => p && p.id === currentUser.id);
+    const uncommittedChips = playerToExit ? Number(Math.max(0, playerToExit.chips).toFixed(2)) : 0;
+
+    // Return ONLY remaining uncommitted table chips to user wallet
+    if (playerToExit && uncommittedChips > 0) {
       if (isPlayerUsingBonus) {
         onUpdateUserBalance(
           currentUser.realBalance,
           currentUser.playMoneyBalance,
-          Number(((currentUser.bonusBalance || 0) + humanPlayer.chips).toFixed(2))
+          Number(((currentUser.bonusBalance || 0) + uncommittedChips).toFixed(2))
         );
       } else {
         onUpdateUserBalance(
-          Number((currentUser.realBalance + humanPlayer.chips).toFixed(2)),
+          Number((currentUser.realBalance + uncommittedChips).toFixed(2)),
           currentUser.playMoneyBalance,
           currentUser.bonusBalance
         );
       }
     }
+
+    // Unseat player from table in Firestore and resolve hand cleanly if in progress
+    if (playerToExit) {
+      const exitSeatIndex = playerToExit.seatIndex;
+      const updatedPlayers = [...table.players];
+      updatedPlayers[exitSeatIndex] = null;
+
+      let nextTableState: PokerTableState;
+      const isMidHand = table.stage !== 'waiting' && table.stage !== 'hand_ended';
+
+      if (isMidHand) {
+        const remainingContenders = updatedPlayers.filter(
+          (p): p is Player => p !== null && !p.isFolded && !p.isSittingOut
+        );
+
+        if (remainingContenders.length === 1) {
+          // Sole remaining contender immediately wins the entire pot!
+          nextTableState = endHandWithSoleWinner(table, updatedPlayers, remainingContenders[0], table.pot);
+        } else if (remainingContenders.length > 1) {
+          let nextTurn = table.currentTurnSeatIndex;
+          if (nextTurn === exitSeatIndex) {
+            nextTurn = getNextActiveSeat(updatedPlayers, exitSeatIndex);
+          }
+          nextTableState = {
+            ...table,
+            players: updatedPlayers,
+            currentTurnSeatIndex: nextTurn,
+          };
+        } else {
+          nextTableState = {
+            ...table,
+            stage: 'waiting',
+            players: updatedPlayers,
+            pot: 0,
+            communityCards: [],
+            handWinners: [],
+          };
+        }
+      } else {
+        const seatedCount = updatedPlayers.filter((p) => p !== null).length;
+        nextTableState = {
+          ...table,
+          players: updatedPlayers,
+          stage: seatedCount < 2 ? 'waiting' : table.stage,
+        };
+      }
+
+      setTable(nextTableState);
+      broadcastTableState(nextTableState);
+      emitPlayerLeaveSocket(table.id, currentUser.id, exitSeatIndex);
+      leaveTableSeatInFirestoreAtomic(table.id, exitSeatIndex, currentUser.id, nextTableState);
+      leaveTableSocket(table.id, currentUser.id, exitSeatIndex);
+
+      const leaveText = lang === 'az'
+        ? `🚪 ${currentUser.username} masadan ayrıldı (${uncommittedChips > 0 ? `$${uncommittedChips.toLocaleString()} balansa qaytarıldı` : 'bütün çiplərini uduzdu'}).`
+        : `🚪 ${currentUser.username} left the table (${uncommittedChips > 0 ? `$${uncommittedChips.toLocaleString()} returned to balance` : 'lost all chips'}).`;
+      const leaveMsg: ChatMessage = {
+        id: `sys_leave_${Date.now()}`,
+        tableId: table.id,
+        senderId: currentUser.id || 'system',
+        senderName: 'System',
+        senderAvatar: '',
+        text: leaveText,
+        message: leaveText,
+        timestamp: Date.now(),
+        isSystem: true,
+      };
+      sendTableChatMessageSocket(table.id, leaveMsg);
+      sendTableChatMessage(table.id, leaveMsg);
+    }
+
+    try {
+      localStorage.removeItem('poker_active_table_id');
+    } catch {}
+
     onLeaveTable();
   };
 
   // Send message in chat
   const handleSendMessage = (text: string) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+
+    const now = Date.now();
     const newMsg: ChatMessage = {
-      id: `chat_${Date.now()}`,
-      senderName: currentUser.username,
-      senderAvatar: currentUser.avatar,
-      text,
-      timestamp: Date.now(),
+      id: `chat_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      tableId: table.id,
+      senderId: currentUser.id || 'anonymous_player',
+      senderName: currentUser.username || 'Player',
+      senderAvatar: currentUser.avatar || '',
+      text: trimmed,
+      message: trimmed,
+      timestamp: now,
+      isSystem: false,
     };
     setChatMessages((prev) => [...prev, newMsg]);
+    sendTableChatMessageSocket(table.id, newMsg);
+    sendTableChatMessage(table.id, newMsg);
+    triggerSpeechBubble(currentUser.username, trimmed);
 
-    // Bot friendly replies
-    if (Math.random() > 0.4) {
+    // Bot friendly replies with bilingual phrases
+    if (Math.random() > 0.35) {
       setTimeout(() => {
-        const botReplies = [
-          'Nice hand!',
-          'Good luck all!',
-          'Gg!',
+        const botReplies = lang === 'az' ? [
+          'Gözəl əl! 🔥',
+          'Uğurlar hamıya! 🍀',
+          'Yaxşı oyun! (GG) 👏',
+          'Uff, bəxt gətirmədi...',
+          'Poker həyat tərzidir 🃏',
+          'Vamos! 🚀',
+          'Təşəkkürlər! 🙏',
+          'Çek yoxsa reyz?',
+          'Əla blef idi! 😎',
+        ] : [
+          'Nice hand! 🔥',
+          'Good luck all! 🍀',
+          'Good game! (GG) 👏',
           'Uff, bad beat...',
-          'Poker is life 🔥',
-          'Vamos!',
+          'Poker is life 🃏',
+          'Vamos! 🚀',
+          'Thank you! 🙏',
           'Check or raise?',
+          'Nice bluff! 😎',
         ];
         const randomBot = table.players.find((p) => p && !p.isHuman);
         if (randomBot) {
-          setChatMessages((prev) => [
-            ...prev,
-            {
-              id: `b_chat_${Date.now()}`,
-              senderName: randomBot.name,
-              senderAvatar: randomBot.avatar,
-              text: botReplies[Math.floor(Math.random() * botReplies.length)],
-              timestamp: Date.now(),
-            },
-          ]);
+          const botReplyText = botReplies[Math.floor(Math.random() * botReplies.length)];
+          const botNow = Date.now();
+          const botMsg: ChatMessage = {
+            id: `b_chat_${botNow}_${Math.random().toString(36).substring(2, 7)}`,
+            tableId: table.id,
+            senderId: randomBot.id || `bot_${randomBot.seatIndex}`,
+            senderName: randomBot.name || 'Bot',
+            senderAvatar: randomBot.avatar || '',
+            text: botReplyText,
+            message: botReplyText,
+            timestamp: botNow,
+            isSystem: false,
+          };
+          setChatMessages((prev) => [...prev, botMsg]);
+          sendTableChatMessageSocket(table.id, botMsg);
+          sendTableChatMessage(table.id, botMsg);
+          triggerSpeechBubble(randomBot.name, botReplyText);
         }
-      }, 1500);
+      }, 1400);
     }
   };
 
   // Floating Emoji reaction
   const handleSendEmoji = (emoji: string) => {
     const newEmoji: FloatingEmoji = {
-      id: `emo_${Date.now()}`,
+      id: `emo_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       seatIndex: humanSeatIndex,
       emoji,
       timestamp: Date.now(),
     };
     setFloatingEmojis((prev) => [...prev, newEmoji]);
+    sendTableEmojiSocket(table.id, newEmoji);
+    sendTableEmoji(table.id, newEmoji);
     setTimeout(() => {
       setFloatingEmojis((prev) => prev.filter((e) => e.id !== newEmoji.id));
     }, 2500);
@@ -1255,8 +2313,9 @@ export const PokerTable: React.FC<PokerTableProps> = ({
 
   // Mathematical Seat Coordinate Calculation for 2-max, 6-max, and 9-max oval table
   const getSeatCoordinates = (seatIdx: number, totalCapacity: number) => {
-    // Offset so human player is always positioned centered at the bottom
-    const relativeIndex = (seatIdx - humanSeatIndex + totalCapacity) % totalCapacity;
+    // Offset so human player is always positioned centered at the bottom, or standard 0 if spectator
+    const referenceIndex = humanSeatIndex >= 0 ? humanSeatIndex : 0;
+    const relativeIndex = (seatIdx - referenceIndex + totalCapacity) % totalCapacity;
 
     if (totalCapacity === 2) {
       return relativeIndex === 0
@@ -1294,142 +2353,383 @@ export const PokerTable: React.FC<PokerTableProps> = ({
   };
 
   return (
-    <div className="relative w-full max-w-full h-[calc(100dvh-54px)] max-h-[calc(100dvh-54px)] bg-zinc-950 flex flex-col justify-between overflow-hidden select-none px-2 py-1.5 sm:px-3 sm:py-2">
-      {/* Top Table Control Bar */}
-      <div className="flex items-center justify-between z-20 px-1 max-w-4xl mx-auto w-full">
-        <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-          {/* Small Exit Button (Lobby) */}
+    <div className="relative w-full max-w-full h-[calc(100dvh-54px)] max-h-[calc(100dvh-54px)] bg-zinc-950 flex flex-col justify-between overflow-hidden select-none px-2 py-1 sm:px-3 sm:py-1.5">
+      {/* Left Slide-out Drawer (Matching 00:08 in video) */}
+      <AnimatePresence>
+        {isLeftDrawerOpen && (
+          <div className="fixed inset-0 z-50 flex">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsLeftDrawerOpen(false)}
+              className="fixed inset-0 bg-black/70 backdrop-blur-sm"
+            />
+
+            {/* Slide-out Drawer Panel */}
+            <motion.div
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+              className="relative w-72 max-w-[85vw] h-full bg-zinc-950 border-r border-zinc-800 flex flex-col justify-between z-10 shadow-2xl p-4 text-zinc-200"
+            >
+              <div className="space-y-4">
+                {/* Header in Drawer */}
+                <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-600 to-yellow-400 flex items-center justify-center text-zinc-950 font-black shadow">
+                      ♠
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-black text-white tracking-wide">POKER ARENA</h3>
+                      <p className="text-[10px] text-amber-400/80 font-mono font-bold">
+                        {table.name} (${table.smallBlind}/${table.bigBlind})
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsLeftDrawerOpen(false)}
+                    className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Navigation Items in Drawer (Exact items from video 00:08) */}
+                <nav className="space-y-1.5">
+                  {/* 1. Masanı tərk et */}
+                  <button
+                    onClick={() => {
+                      setIsLeftDrawerOpen(false);
+                      handleExitTable();
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-900/50 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer group"
+                  >
+                    <div className="flex items-center space-x-3">
+                      <LogOut className="w-4 h-4 text-red-400 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-semibold">{lang === 'az' ? 'Masanı tərk et' : 'Leave table'}</span>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400" />
+                  </button>
+
+                  {/* 2. Lobbiyə */}
+                  <button
+                    onClick={() => {
+                      setIsLeftDrawerOpen(false);
+                      onLeaveTable();
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-900/50 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer group"
+                  >
+                    <div className="flex items-center space-x-3">
+                      <Home className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-semibold">{lang === 'az' ? 'Lobbiyə' : 'To Lobby'}</span>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400" />
+                  </button>
+
+                  {/* 3. Parametrlər */}
+                  {onOpenSettings && (
+                    <button
+                      onClick={() => {
+                        setIsLeftDrawerOpen(false);
+                        onOpenSettings();
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-900/50 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer group"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <Settings className="w-4 h-4 text-amber-400 group-hover:rotate-45 transition-transform" />
+                        <span className="text-xs font-semibold">{lang === 'az' ? 'Parametrlər' : 'Settings'}</span>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400" />
+                    </button>
+                  )}
+
+                  {/* 4. Paylamalarım (Hand History / Stats) */}
+                  <button
+                    onClick={() => {
+                      setIsLeftDrawerOpen(false);
+                      setShowStatsModal(true);
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-900/50 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer group"
+                  >
+                    <div className="flex items-center space-x-3">
+                      <History className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-semibold">{lang === 'az' ? 'Paylamalarım (Statistika)' : 'My Hands (Stats)'}</span>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400" />
+                  </button>
+
+                  {/* 5. Poker qaydaları */}
+                  {onOpenHandRankings && (
+                    <button
+                      onClick={() => {
+                        setIsLeftDrawerOpen(false);
+                        onOpenHandRankings();
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-900/50 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer group"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <BookOpen className="w-4 h-4 text-purple-400 group-hover:scale-110 transition-transform" />
+                        <span className="text-xs font-semibold">{lang === 'az' ? 'Poker qaydaları' : 'Poker rules'}</span>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400" />
+                    </button>
+                  )}
+
+                  {/* 6. Dəstək */}
+                  {onOpenSupport && (
+                    <button
+                      onClick={() => {
+                        setIsLeftDrawerOpen(false);
+                        onOpenSupport();
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-zinc-900/50 hover:bg-zinc-900 text-zinc-300 hover:text-white transition-all cursor-pointer group"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <MessageSquare className="w-4 h-4 text-teal-400 group-hover:scale-110 transition-transform" />
+                        <span className="text-xs font-semibold">{lang === 'az' ? 'Dəstək' : 'Support'}</span>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400" />
+                    </button>
+                  )}
+                </nav>
+              </div>
+
+              {/* User Balance Footer in Drawer */}
+              <div className="border-t border-zinc-800/80 pt-3 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-zinc-400 block">{lang === 'az' ? 'Hesab Balansı' : 'Account Balance'}</span>
+                  <span className="text-sm font-black text-emerald-400 font-mono">${totalUsableBalance.toFixed(2)}</span>
+                </div>
+                {onLogout && (
+                  <button
+                    onClick={() => {
+                      setIsLeftDrawerOpen(false);
+                      handleExitTable();
+                      onLogout();
+                    }}
+                    className="px-2 py-1 rounded-lg bg-red-950/60 hover:bg-red-900/80 border border-red-800/40 text-red-300 text-[11px] font-bold transition-all cursor-pointer"
+                  >
+                    {lang === 'az' ? 'Çıxış' : 'Logout'}
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Jackpot Modal */}
+      <AnimatePresence>
+        {showJackpotModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowJackpotModal(false)}
+              className="fixed inset-0 bg-black/75 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-sm bg-gradient-to-b from-zinc-900 via-zinc-950 to-black border-2 border-amber-500/80 rounded-3xl p-6 shadow-2xl z-10 text-center"
+            >
+              <div className="w-14 h-14 mx-auto rounded-full bg-gradient-to-tr from-amber-600 via-yellow-400 to-amber-300 flex items-center justify-center text-zinc-950 font-black text-2xl shadow-lg shadow-amber-500/40 animate-pulse">
+                JP
+              </div>
+              <h3 className="text-lg font-black text-amber-300 mt-3 tracking-wide">
+                BAD BEAT JACKPOT
+              </h3>
+              <p className="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 via-amber-200 to-yellow-400 font-mono my-2 drop-shadow">
+                ${jackpotPool.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+              </p>
+              <p className="text-xs text-zinc-300 leading-relaxed">
+                {lang === 'az'
+                  ? 'Kare (Four of a Kind) və ya daha güclü əllə uduzan oyunçu və masa iştirakçıları Jackpot fondunu bölüşür!'
+                  : 'Bad beat with Four of a Kind or better triggers the mega progressive Jackpot for the table!'}
+              </p>
+              <button
+                onClick={() => setShowJackpotModal(false)}
+                className="mt-5 w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-zinc-950 font-black text-xs shadow-lg transition-all cursor-pointer"
+              >
+                {lang === 'az' ? 'Bağla' : 'Close'}
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Top Table Control Bar (Exact Video Layout: 00:00 - 00:20) */}
+      <div className="flex items-center justify-between z-20 px-1 max-w-4xl mx-auto w-full h-10 shrink-0">
+        {/* Left Side: Hamburger Menu & Multi-Table Tab Pill */}
+        <div className="flex items-center space-x-2">
+          {/* Hamburger Menu (Opens Left Drawer) */}
           <button
-            onClick={handleExitTable}
-            id="table_leave_btn"
-            className="flex items-center space-x-1 py-1 px-2.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold transition-colors shadow cursor-pointer"
+            onClick={() => {
+              soundManager.playButtonClick();
+              setIsLeftDrawerOpen(true);
+            }}
+            id="table_hamburger_menu_btn"
+            title={lang === 'az' ? 'Masa Menyu' : 'Table Menu'}
+            className="p-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-200 hover:text-white transition-all shadow cursor-pointer active:scale-95 flex items-center justify-center"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>{t.leave_table}</span>
+            <Menu className="w-5 h-5" />
           </button>
 
-          {/* Direct Logout / Girişə Qayıt Button */}
-          {onLogout && (
+          {/* Table Tab Pill ([===] [+]) */}
+          <div className="flex items-center bg-zinc-900/90 border border-zinc-800/90 rounded-lg p-0.5 text-xs">
             <button
               onClick={() => {
-                handleExitTable();
-                onLogout();
+                soundManager.playButtonClick();
+                setShowStatsModal(true);
               }}
-              id="table_logout_btn"
-              className="flex items-center space-x-1 py-1 px-2.5 rounded-lg bg-gradient-to-r from-red-950/80 to-zinc-900 hover:from-red-900/90 hover:to-zinc-850 border border-red-800/50 hover:border-red-600 text-red-300 hover:text-white text-xs font-bold transition-all shadow cursor-pointer active:scale-95"
-              title={lang === 'az' ? 'Hesabdan çıxış et və giriş/qeydiyyat ekranına qayıt' : 'Log out to sign-in / registration screen'}
+              className="flex items-center space-x-1.5 px-2 py-1 rounded-md bg-zinc-800 text-zinc-200 text-xs font-semibold cursor-pointer"
             >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>{lang === 'az' ? 'Çıxış (Girişə Qayıt)' : 'Logout'}</span>
+              <Layers className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline font-bold">{table.name}</span>
+              <span className="sm:hidden font-bold">#1</span>
             </button>
-          )}
-
-          {/* Table Details Badge */}
-          <div className="flex items-center space-x-2 bg-zinc-900/80 border border-zinc-800 px-2.5 py-0.5 rounded-lg text-xs">
-            <span className="font-bold text-white text-xs">{table.name}</span>
-            <span className="text-zinc-500">•</span>
-            <span className="text-amber-400 font-mono font-semibold text-xs">
-              ${table.smallBlind}/${table.bigBlind}
-            </span>
-            <span className="text-zinc-500">•</span>
-            <span className="text-zinc-400 text-xs">
-              #{table.handNumber}
-            </span>
+            <button
+              onClick={() => {
+                soundManager.playButtonClick();
+                onLeaveTable();
+              }}
+              title={lang === 'az' ? 'Yeni Masa Aç' : 'Add Table'}
+              className="px-2 py-1 text-zinc-400 hover:text-white hover:bg-zinc-800/80 rounded-md transition-colors cursor-pointer text-sm font-bold"
+            >
+              +
+            </button>
           </div>
         </div>
 
-        {/* Right Quick Tools: Settings, Support, Hand Rankings */}
-        <div className="flex items-center space-x-1.5 shrink-0">
-          {onOpenHandRankings && (
-            <button
-              onClick={() => {
-                soundManager.playButtonClick();
-                onOpenHandRankings();
-              }}
-              title={lang === 'az' ? 'Poker Kombinasiyaları & Qaydalar' : 'Hand Rankings'}
-              className="p-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-amber-300 transition-colors cursor-pointer"
-            >
-              <Award className="w-3.5 h-3.5" />
-            </button>
-          )}
+        {/* Right Side: JP Badge, Refresh Table, Settings, Social/Chat */}
+        <div className="flex items-center space-x-1.5">
+          {/* JP (Jackpot) Coin Badge */}
+          <button
+            onClick={() => {
+              soundManager.playButtonClick();
+              setShowJackpotModal(true);
+            }}
+            id="table_jp_badge_btn"
+            title={lang === 'az' ? 'Jackpot Fondu: $14,250.75' : 'Jackpot Pool: $14,250.75'}
+            className="flex items-center space-x-1 px-2 py-1 rounded-full bg-gradient-to-r from-amber-600/30 to-yellow-500/20 border border-amber-500/50 hover:border-amber-400 text-amber-300 text-xs font-black shadow-sm transition-all cursor-pointer active:scale-95"
+          >
+            <div className="w-4 h-4 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-300 text-zinc-950 font-black text-[9px] flex items-center justify-center shadow">
+              JP
+            </div>
+            <span className="font-mono text-[11px] hidden sm:inline">${(jackpotPool / 1000).toFixed(1)}k</span>
+          </button>
 
-          {onOpenSupport && (
-            <button
-              onClick={() => {
-                soundManager.playButtonClick();
-                onOpenSupport();
-              }}
-              title={lang === 'az' ? 'Adminlə Canlı Əlaqə & Dəstək' : 'Live Support'}
-              className="flex items-center space-x-1 py-1 px-2 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-amber-500/50 text-amber-400 hover:text-amber-300 text-xs font-bold transition-all shadow cursor-pointer"
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{lang === 'az' ? 'Dəstək' : 'Support'}</span>
-            </button>
-          )}
+          {/* Table Refresh Button */}
+          <button
+            onClick={handleManualTableRefresh}
+            id="table_refresh_btn"
+            title={lang === 'az' ? 'Masanı yenilə' : 'Refresh Table'}
+            className="p-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white transition-all shadow cursor-pointer active:scale-95"
+          >
+            <RotateCw className={`w-4 h-4 ${isRefreshingTable ? 'animate-spin text-amber-400' : ''}`} />
+          </button>
 
+          {/* Table Settings Modal Button */}
           {onOpenSettings && (
             <button
               onClick={() => {
                 soundManager.playButtonClick();
                 onOpenSettings();
               }}
-              title={lang === 'az' ? 'Masa və Səs Ayarları' : 'Settings'}
-              className="flex items-center space-x-1 py-1 px-2 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold transition-colors shadow cursor-pointer"
+              id="table_settings_btn"
+              title={lang === 'az' ? 'Masa Parametrləri' : 'Settings'}
+              className="p-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white transition-all shadow cursor-pointer active:scale-95"
             >
-              <Settings className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{lang === 'az' ? 'Ayarlar' : 'Settings'}</span>
+              <Settings className="w-4 h-4" />
             </button>
           )}
+
+          {/* Chat / Room Share Button */}
+          <button
+            onClick={handleShareRoomLink}
+            id="table_share_btn"
+            title={lang === 'az' ? 'Masa Linkini Kopyala' : 'Share Table'}
+            className="p-1.5 rounded-lg bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white transition-all shadow cursor-pointer active:scale-95"
+          >
+            {copiedRoomToast ? <Check className="w-4 h-4 text-emerald-400" /> : <Share2 className="w-4 h-4" />}
+          </button>
         </div>
       </div>
 
-      {/* Main Oval Poker Table Canvas */}
-      <div className="relative flex-1 flex items-center justify-center my-1 w-full max-w-4xl mx-auto px-1">
-        {/* Outer Wooden / Leather Rail */}
-        <div className="relative w-full h-[270px] sm:h-[310px] md:h-[340px] lg:h-[360px] rounded-[130px] sm:rounded-[170px] md:rounded-[200px] bg-gradient-to-b from-amber-950 via-zinc-950 to-amber-950 p-2.5 sm:p-3.5 shadow-2xl shadow-black border-4 border-amber-900/60 flex items-center justify-center">
+      {/* Main Stadium Poker Table Canvas (Matching Video: 00:00 - 00:20) */}
+      <div className="relative flex-1 flex items-center justify-center my-auto w-full max-w-4xl mx-auto px-1">
+        {/* Outer Dark Wooden / Leather Padded Rail with Gold Trim */}
+        <div className="relative w-full h-[320px] sm:h-[360px] md:h-[390px] lg:h-[410px] rounded-[150px] sm:rounded-[180px] md:rounded-[210px] bg-gradient-to-b from-zinc-900 via-black to-zinc-900 p-3 sm:p-4 shadow-[0_15px_50px_rgba(0,0,0,0.9)] border-4 border-amber-900/50 flex items-center justify-center">
           
-          {/* Inner Felt Area */}
-          <div className={`relative w-full h-full rounded-[115px] sm:rounded-[155px] md:rounded-[185px] ${feltThemes} border-2 shadow-inner flex flex-col items-center justify-center overflow-hidden`}>
+          {/* Subtle Outer Rail Gold Inlay Line */}
+          <div className="absolute inset-1 sm:inset-1.5 rounded-[144px] sm:rounded-[174px] md:rounded-[204px] border border-amber-500/20 pointer-events-none" />
+
+          {/* Inner Deep Emerald Felt Area */}
+          <div className={`relative w-full h-full rounded-[138px] sm:rounded-[168px] md:rounded-[198px] ${feltThemes} border-2 border-emerald-600/40 shadow-[inset_0_10px_35px_rgba(0,0,0,0.8)] flex flex-col items-center justify-center overflow-hidden`}>
             
-            {/* Table Watermark & Betting Line */}
-            <div className="absolute inset-5 sm:inset-9 rounded-[95px] sm:rounded-[135px] border border-white/10 pointer-events-none" />
-            <div className="absolute flex flex-col items-center justify-center opacity-15 pointer-events-none">
-              <span className="text-4xl sm:text-6xl font-black text-white tracking-widest font-mono">
-                ♠ ♥ ♦ ♣
-              </span>
-              <span className="text-[10px] sm:text-xs font-bold text-white tracking-widest mt-0.5">
-                POKER ARENA PRO
-              </span>
-            </div>
-
-            {/* Center Felt: Pots & Community Cards */}
-            <div className="relative z-10 flex flex-col items-center justify-center space-y-2">
-              {/* Main Pot & Side Pots Display */}
-              <div className="flex items-center space-x-1.5">
-                <div className="bg-zinc-950/85 border border-amber-500/40 px-2.5 py-0.5 rounded-full shadow-lg flex items-center space-x-1.5 backdrop-blur-sm">
-                  <div className="w-4 h-4 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-300 flex items-center justify-center text-zinc-950 font-black text-[10px] shadow">
-                    $
-                  </div>
-                  <span className="text-xs sm:text-sm font-black text-amber-400 font-mono tracking-tight">
-                    ${table.pot.toLocaleString()}
-                  </span>
-                </div>
-
-                {/* Side pots if any */}
-                {table.sidePots.map((sp, idx) => (
-                  <div
-                    key={idx}
-                    className="bg-zinc-950/85 border border-blue-500/40 px-2 py-0.5 rounded-full text-[10px] font-bold text-blue-300 flex items-center space-x-1 backdrop-blur-sm"
-                  >
-                    <span className="w-3.5 h-3.5 rounded-full bg-blue-500/30 text-blue-300 flex items-center justify-center text-[9px] font-bold">
-                      ${idx + 1}
-                    </span>
-                    <span className="font-mono font-bold">${sp.amount}</span>
-                  </div>
-                ))}
+            {/* Table Watermark & Clean Betting Line */}
+            <div className="absolute inset-4 sm:inset-7 rounded-[120px] sm:rounded-[150px] md:rounded-[180px] border border-white/10 pointer-events-none" />
+            
+            {/* Center Felt Markings (Matching Video: Hand #, Bank, Logo, Stakes) */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none z-0">
+              {/* Hand #7996971 */}
+              <div className="text-[10px] sm:text-xs font-mono font-bold text-white/40 tracking-wider mb-0.5">
+                Hand #{table.handNumber ? 7990000 + table.handNumber : '7996971'}
               </div>
 
-              {/* 5 Community Cards (Flop, Turn, River) - Compact Size */}
+              {/* Bank: $ X (Center Pot Text Display) */}
+              <div className="flex flex-col items-center my-0.5">
+                <span className="text-[11px] sm:text-xs font-bold text-white/70 tracking-wide">
+                  Bank:
+                </span>
+                <span className="text-base sm:text-lg font-black text-amber-300 font-mono tracking-tight drop-shadow">
+                  ${table.pot.toLocaleString()}
+                </span>
+              </div>
+
+              {/* Center PINCO / POKER ARENA Logo Watermark */}
+              <div className="flex flex-col items-center my-1 opacity-25">
+                <span className="text-2xl sm:text-3xl font-black text-red-500 tracking-wider">
+                  PINCO
+                </span>
+                <span className="text-[8px] sm:text-[9px] font-black text-amber-300 bg-amber-950/80 px-2 py-0.2 rounded-full border border-amber-400/40 tracking-widest uppercase -mt-0.5">
+                  POKER
+                </span>
+              </div>
+
+              {/* Bottom Felt Table Info & Stakes */}
+              <div className="text-[9px] sm:text-[10.5px] font-semibold text-white/40 tracking-wide mt-1 text-center">
+                <span>{table.name || 'Legends Table #2'}</span>
+                <span className="mx-1">•</span>
+                <span>Hold'em No Limit Stakes: ${table.smallBlind} / ${table.bigBlind}</span>
+              </div>
+            </div>
+
+            {/* Center Active Pot, Side Pots & Community Cards */}
+            <div className="relative z-10 flex flex-col items-center justify-center space-y-1 mt-6 sm:mt-7">
+              {/* Side pots if any */}
+              {table.sidePots && table.sidePots.length > 0 && (
+                <div className="flex items-center space-x-1.5">
+                  {table.sidePots.map((sp, idx) => (
+                    <div
+                      key={idx}
+                      className="bg-zinc-950/85 border border-blue-500/40 px-2 py-0.5 rounded-full text-[9px] font-bold text-blue-300 flex items-center space-x-1 backdrop-blur-sm shadow"
+                    >
+                      <span className="w-3 h-3 rounded-full bg-blue-500/30 text-blue-300 flex items-center justify-center text-[8px] font-bold">
+                        ${idx + 1}
+                      </span>
+                      <span className="font-mono">${sp.amount}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 5 Community Cards (Flop, Turn, River) */}
               <div className="flex items-center space-x-1">
                 {[0, 1, 2, 3, 4].map((index) => {
                   const card = table.communityCards[index];
@@ -1440,7 +2740,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                   return (
                     <div
                       key={index}
-                      className="w-7 h-10 sm:w-8 sm:h-11 rounded border border-white/15 bg-black/25 flex items-center justify-center shadow-md"
+                      className="w-7 h-10 sm:w-8 sm:h-11 md:w-9 md:h-12 rounded border border-white/20 bg-black/40 flex items-center justify-center shadow-lg transition-all"
                     >
                       {card ? (
                         <PlayingCard
@@ -1448,51 +2748,63 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                           size="xs"
                           isFourColor={isFourColor}
                           isHighlighted={isWinningCard}
-                            delay={index * 0.1}
-                          />
-                        ) : (
-                          <div className="w-4 h-7 rounded border border-dashed border-white/10 opacity-30" />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Game Stage & Street indicator or Winner Banner */}
-                {winnerBanner ? (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="flex flex-col items-center bg-zinc-950/95 border border-amber-400/80 px-3 py-1 rounded-xl shadow-xl backdrop-blur-md"
-                  >
-                    <div className="flex items-center space-x-1.5">
-                      <Crown className="w-3.5 h-3.5 text-yellow-400 animate-bounce" />
-                      <span className="text-[11px] font-black text-amber-300">{winnerBanner.name}</span>
-                      <span className="text-[11px] font-black text-emerald-400 font-mono">+${winnerBanner.amount.toFixed(2)}</span>
-                    </div>
-                    <div className="flex items-center space-x-1 text-[8.5px] text-zinc-300">
-                      <span>{winnerBanner.handName}</span>
-                      {winnerBanner.rakeAmount !== undefined && winnerBanner.rakeAmount > 0 && (
-                        <span className="text-amber-400 font-bold bg-amber-950/90 px-1 py-0.2 rounded border border-amber-500/40">
-                          Masa Faizi (10%): -${winnerBanner.rakeAmount.toFixed(2)}
-                        </span>
+                          delay={index * 0.1}
+                        />
+                      ) : (
+                        <div className="w-4 h-7 rounded border border-dashed border-white/10 opacity-20" />
                       )}
                     </div>
-                  </motion.div>
-                ) : (
-                  <div className="text-[9.5px] font-semibold text-white/60 tracking-wider uppercase bg-black/30 px-2.5 py-0.5 rounded-full">
+                  );
+                })}
+              </div>
+
+              {/* Winner Banner or Street Stage Indicator */}
+              {winnerBanner ? (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="flex flex-col items-center bg-zinc-950/95 border border-amber-400/90 px-3 py-1 rounded-xl shadow-2xl backdrop-blur-md z-20"
+                >
+                  <div className="flex items-center space-x-1.5">
+                    <Crown className="w-3.5 h-3.5 text-yellow-400 animate-bounce" />
+                    <span className="text-[11px] font-black text-amber-300">{winnerBanner.name}</span>
+                    <span className="text-[11px] font-black text-emerald-400 font-mono">+${winnerBanner.amount.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center space-x-1.5 text-[8.5px] text-zinc-300 mt-0.5">
+                    <span>{winnerBanner.handName}</span>
+                    {winnerBanner.rakeAmount !== undefined && winnerBanner.rakeAmount > 0 && (
+                      <span className="text-amber-400 font-bold bg-amber-950/90 px-1 rounded border border-amber-500/40">
+                        Rake: -${winnerBanner.rakeAmount.toFixed(2)}
+                      </span>
+                    )}
+                    {nextHandCountdown !== null && (
+                      <span className="text-amber-300 font-black bg-amber-500/25 border border-amber-400/60 px-1.5 rounded-full animate-pulse">
+                        {lang === 'az' ? `${nextHandCountdown}s` : `${nextHandCountdown}s`}
+                      </span>
+                    )}
+                  </div>
+                </motion.div>
+              ) : (
+                <div className="text-[9px] sm:text-[10px] font-bold text-white/70 tracking-wider uppercase bg-black/40 px-2.5 py-0.5 rounded-full flex items-center space-x-1.5 border border-white/10 backdrop-blur-sm">
+                  <span>
                     {table.stage === 'preflop' && 'Pre-Flop'}
                     {table.stage === 'flop' && 'Flop'}
                     {table.stage === 'turn' && 'Turn'}
                     {table.stage === 'river' && 'River'}
                     {table.stage === 'showdown' && 'Showdown'}
                     {table.stage === 'hand_ended' && (lang === 'az' ? 'Əl bitdi' : 'Hand Ended')}
-                  </div>
-                )}
-              </div>
+                  </span>
+                  {table.stage === 'hand_ended' && nextHandCountdown !== null && (
+                    <span className="text-amber-300 font-bold bg-amber-500/20 px-1.5 py-0.2 rounded-full border border-amber-500/40 animate-pulse text-[8.5px]">
+                      {lang === 'az' ? `${nextHandCountdown}s sonra` : `In ${nextHandCountdown}s`}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Render Players ON the Table Rail (outside inner clipping container) */}
+          {/* Players & Empty Seat Nodes ON Table Rail */}
           <div className="absolute inset-0 pointer-events-none z-20">
             {table.players.map((player, seatIdx) => {
               const coords = getSeatCoordinates(seatIdx, table.capacity);
@@ -1510,18 +2822,15 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                       }}
                       className="flex flex-col items-center pointer-events-auto z-30"
                     >
+                      {/* Empty Seat Gold Circle with Downward Arrow (Exact match to video: 00:00 - 00:20) */}
                       <button
                         type="button"
                         onClick={() => handleEmptySeatClick(seatIdx)}
                         id={`take_empty_seat_btn_${seatIdx}`}
-                        className="group flex flex-col items-center p-1 rounded-2xl bg-zinc-950/90 border-2 border-dashed border-emerald-500/70 hover:border-amber-400 hover:bg-zinc-900 shadow-xl hover:shadow-amber-500/20 transition-all transform hover:scale-110 active:scale-95 cursor-pointer"
+                        title={lang === 'az' ? 'Oturmaq üçün klikləyin' : 'Click to sit'}
+                        className="w-10 h-10 sm:w-11 sm:h-11 rounded-full border-2 border-amber-500/80 bg-zinc-950/80 hover:bg-zinc-900 hover:border-amber-300 flex items-center justify-center text-amber-400 font-black text-xl sm:text-2xl shadow-[0_0_15px_rgba(245,158,11,0.4)] hover:shadow-[0_0_20px_rgba(245,158,11,0.7)] transition-all transform hover:scale-110 active:scale-95 cursor-pointer animate-pulse"
                       >
-                        <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-emerald-500/20 group-hover:bg-amber-500/25 flex items-center justify-center text-emerald-400 group-hover:text-amber-300">
-                          <PlusCircle className="w-5 h-5 animate-pulse" />
-                        </div>
-                        <span className="text-[8px] sm:text-[9px] font-black text-emerald-300 group-hover:text-amber-300 uppercase tracking-tighter mt-0.5 whitespace-nowrap px-1">
-                          {lang === 'az' ? '+ Otur' : '+ Sit'}
-                        </span>
+                        ↓
                       </button>
                     </div>
                   );
@@ -1538,7 +2847,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                     }}
                     className="flex flex-col items-center pointer-events-none opacity-25"
                   >
-                    <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-full border border-dashed border-white/20 bg-zinc-950/30 flex items-center justify-center" />
+                    <div className="w-8 h-8 rounded-full border border-dashed border-white/20 bg-zinc-950/30 flex items-center justify-center" />
                   </div>
                 );
               }
@@ -1549,7 +2858,7 @@ export const PokerTable: React.FC<PokerTableProps> = ({
               const isBB = table.bigBlindSeatIndex === seatIdx;
               const isTopSeat = parseInt(coords.top, 10) < 50;
 
-              const isCardsRevealed = player.isHuman || table.stage === 'showdown' || table.stage === 'hand_ended';
+              const isCardsRevealed = (player.id === currentUser.id) || table.stage === 'showdown' || table.stage === 'hand_ended';
               let playerHandScore: { rankName: string; rankNameAz: string } | null = null;
               if (isCardsRevealed && player.cards && player.cards.length > 0 && table.communityCards && table.communityCards.length >= 3) {
                 try {
@@ -1597,28 +2906,66 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                 </motion.div>
               );
 
+              // Player Note from Local Storage
+              const playerNote = playerNotes[player.name.trim().toLowerCase()];
+              const playerNotePreset = playerNote?.color ? getPresetByColor(playerNote.color) : undefined;
+              const isOpponent = player.name.toLowerCase() !== currentUser.username.toLowerCase();
+
               // Circular Profile Avatar and Details
               const profileElement = (
-                <div className="relative flex flex-col items-center">
+                <div 
+                  onClick={() => {
+                    soundManager.playButtonClick();
+                    setNoteTargetPlayer(player);
+                  }}
+                  title={
+                    playerNote
+                      ? `${player.name} [${playerNote.label || playerNotePreset?.labelEn || 'Note'}]: ${playerNote.noteText || ''}`
+                      : `${player.name} (${lang === 'az' ? 'Qeyd əlavə etmək üçün klikləyin' : 'Click to add color note'})`
+                  }
+                  className="relative flex flex-col items-center cursor-pointer group select-none"
+                >
+                  {/* Real-time Player Speech Bubble */}
+                  <AnimatePresence>
+                    {playerSpeechBubbles[player.name] && (
+                      <motion.div
+                        initial={{ opacity: 0, y: isTopSeat ? -6 : 6, scale: 0.8 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: isTopSeat ? -4 : 4, scale: 0.8 }}
+                        transition={{ type: 'spring', damping: 15, stiffness: 200 }}
+                        className={`absolute ${
+                          isTopSeat ? 'top-full mt-3' : 'bottom-full mb-3'
+                        } left-1/2 -translate-x-1/2 z-50 pointer-events-none whitespace-nowrap`}
+                      >
+                        <div className="relative bg-zinc-950/95 border border-amber-400/90 text-amber-300 px-2.5 py-1 rounded-xl shadow-2xl shadow-black text-[11px] font-bold backdrop-blur-md flex items-center space-x-1">
+                          <span>{playerSpeechBubbles[player.name].text}</span>
+                          <div
+                            className={`absolute left-1/2 -translate-x-1/2 w-2 h-2 bg-zinc-950 border-amber-400/90 transform rotate-45 ${
+                              isTopSeat ? '-top-1 border-t border-l' : '-bottom-1 border-b border-r'
+                            }`}
+                          />
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
                   <div
-                    className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full transition-all flex items-center justify-center ${
+                    className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full transition-all flex items-center justify-center group-hover:scale-105 active:scale-95 ${
                       player.isWinner
-                        ? 'ring-3 ring-amber-400 shadow-[0_0_15px_rgba(251,191,36,0.85)] scale-105'
-                        : isCurrentTurn
-                        ? 'ring-2 ring-amber-400 shadow-sm shadow-amber-400/40'
+                        ? 'scale-105'
                         : player.isSittingOut || player.isFolded
                         ? 'opacity-40 grayscale'
-                        : 'ring-1 ring-zinc-700'
+                        : ''
                     }`}
                   >
                     {/* Turn Timer Circular Progress */}
                     {isCurrentTurn && (
-                      <svg className="absolute -inset-0.5 w-[calc(100%+4px)] h-[calc(100%+4px)] -rotate-90 pointer-events-none z-10">
+                      <svg className="absolute -inset-1 w-[calc(100%+8px)] h-[calc(100%+8px)] -rotate-90 pointer-events-none z-20">
                         <circle
                           cx="50%"
                           cy="50%"
                           r="46%"
-                          className="stroke-amber-400 stroke-[2] fill-none transition-all duration-1000"
+                          className="stroke-amber-400 stroke-[2.5] fill-none transition-all duration-1000 shadow-[0_0_8px_rgba(251,191,36,0.8)]"
                           strokeDasharray="100"
                           strokeDashoffset={`${100 - (turnTimeLeft / table.timeBank) * 100}`}
                           strokeLinecap="round"
@@ -1626,13 +2973,31 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                       </svg>
                     )}
 
-                    {/* Circular Avatar Image */}
-                    <img
+                    {/* VIP Framed Avatar Component */}
+                    <AvatarWithFrame
                       src={player.avatar}
                       alt={player.name}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full rounded-full object-cover border border-zinc-900 bg-zinc-900 shadow-sm"
+                      size="sm"
+                      frameId={player.selectedAvatarFrame || (player.id === currentUser.id ? currentUser.selectedAvatarFrame : undefined) || 'default'}
+                      vipLevel={player.vipLevel || (player.id === currentUser.id ? currentUser.vipLevel : 1)}
+                      isWinner={player.isWinner}
+                      className="w-full h-full"
                     />
+
+                    {/* Color-Coded Note Badge on Top-Right of Avatar */}
+                    {playerNotePreset ? (
+                      <div
+                        className={`absolute -top-1.5 -right-1.5 px-1 py-0.2 rounded-full ${playerNotePreset.badgeBg} text-zinc-950 text-[7px] font-black shadow-md border border-white/40 flex items-center space-x-0.5 z-30 transition-transform group-hover:scale-110`}
+                      >
+                        <Tag className="w-2 h-2 fill-current" />
+                      </div>
+                    ) : playerNote ? (
+                      <div
+                        className="absolute -top-1.5 -right-1.5 px-1 py-0.2 rounded-full bg-amber-400 text-zinc-950 text-[7px] font-black shadow-md border border-white/40 flex items-center space-x-0.5 z-30"
+                      >
+                        <Edit3 className="w-2 h-2" />
+                      </div>
+                    ) : null}
 
                     {/* Golden WIN Overlay directly over Winner's Profile Avatar */}
                     {player.isWinner && (
@@ -1681,6 +3046,21 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                       </div>
                     )}
 
+                    {/* Consecutive Missed Turns AFK Badge (1/3 or 2/3 warning indicator) */}
+                    {!player.isSittingOut && (player.consecutiveMissedTurns || 0) > 0 && (
+                      <div
+                        title={
+                          lang === 'az'
+                            ? `${player.consecutiveMissedTurns}/3 gediş qaçırılıb (3 ardıcıl qaçırılsa Masadan Kənar olacaq)`
+                            : `${player.consecutiveMissedTurns}/3 missed turns (3 will auto sit-out)`
+                        }
+                        className="absolute -bottom-1 -left-1 bg-amber-500 text-zinc-950 font-mono font-black text-[7px] px-1 py-0.2 rounded-full z-20 shadow border border-amber-300 flex items-center space-x-0.5"
+                      >
+                        <span>⏱️</span>
+                        <span>{player.consecutiveMissedTurns}/3</span>
+                      </div>
+                    )}
+
                     {/* Turn Timer Countdown Seconds */}
                     {isCurrentTurn && (
                       <div className="absolute -bottom-1 -right-1 bg-amber-400 text-zinc-950 font-mono font-black text-[8px] px-0.5 rounded-full z-20 shadow">
@@ -1692,33 +3072,38 @@ export const PokerTable: React.FC<PokerTableProps> = ({
                   {/* Underneath Profile: Player Name, Table Balance & Action */}
                   <div className="flex flex-col items-center mt-0.5 space-y-0.2">
                     {/* Player Name */}
-                    <div className="text-[9px] font-bold max-w-[72px] truncate text-center leading-tight drop-shadow flex items-center justify-center space-x-0.5">
+                    <div className="text-[9px] font-bold max-w-[72px] truncate text-center leading-tight drop-shadow flex items-center justify-center space-x-0.5 group-hover:text-amber-300 transition-colors">
                       {player.name.toUpperCase() === 'ADMIN' ? (
                         <span className="font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-yellow-200 to-amber-400 drop-shadow-[0_0_4px_rgba(245,158,11,0.7)] flex items-center space-x-0.5">
                           <span>👑</span>
                           <span>ADMIN</span>
                         </span>
                       ) : (
-                        <span className="text-white">{player.name}</span>
+                        <span className="text-white group-hover:text-amber-300">{player.name}</span>
                       )}
                       {player.vipLevel > 1 && player.name.toUpperCase() !== 'ADMIN' && <Crown className="w-2 h-2 text-amber-400 shrink-0" />}
                     </div>
 
                     {/* Table Balance (Masa Balansı) */}
-                    <div
-                      className={`px-1.5 py-0.5 rounded-full text-[9px] font-mono font-bold shadow text-center leading-none flex items-center justify-center space-x-1 ${
-                        player.isHuman && isPlayerUsingBonus
-                          ? 'bg-amber-950/90 border border-amber-500/60 text-amber-300'
-                          : 'bg-zinc-950/90 border border-emerald-500/50 text-emerald-400'
-                      }`}
-                    >
+                    <div className="px-1.5 py-0.5 rounded-full text-[9px] font-mono font-bold shadow text-center leading-none flex items-center justify-center space-x-1 bg-zinc-950/90 border border-emerald-500/50 text-emerald-400">
                       <span>${player.chips.toLocaleString()}</span>
-                      {player.isHuman && isPlayerUsingBonus && (
-                        <span className="text-[7px] font-black text-amber-400 uppercase tracking-tighter px-0.5 rounded bg-amber-500/20 border border-amber-500/40">
-                          Bonus
-                        </span>
-                      )}
                     </div>
+
+                    {/* Color-Coded Note Badge Indicator below balance */}
+                    {playerNote && (
+                      <div
+                        className={`mt-0.5 px-1.5 py-0.2 rounded-full text-[7px] font-bold border flex items-center space-x-0.5 max-w-[76px] truncate shadow-sm ${
+                          playerNotePreset
+                            ? `${playerNotePreset.bgClass} ${playerNotePreset.borderClass} ${playerNotePreset.textClass}`
+                            : 'bg-zinc-900 border-zinc-750 text-zinc-300'
+                        }`}
+                      >
+                        <span className={`w-1 h-1 rounded-full ${playerNotePreset?.badgeBg || 'bg-amber-400'} shrink-0`} />
+                        <span className="truncate">
+                          {playerNote.label || (playerNotePreset ? (lang === 'az' ? playerNotePreset.labelAz.split(' ')[0] : playerNotePreset.labelEn.split(' ')[0]) : (lang === 'az' ? 'Qeyd' : 'Note'))}
+                        </span>
+                      </div>
+                    )}
 
                     {/* Action status tag */}
                     {player.isWinner ? (
@@ -1821,32 +3206,35 @@ export const PokerTable: React.FC<PokerTableProps> = ({
             </div>
           </div>
         ) : humanPlayer.isSittingOut ? (
-          <div className="bg-zinc-950/95 border border-emerald-500/50 p-2.5 rounded-xl flex items-center justify-between gap-2 shadow-xl backdrop-blur-md">
+          <div className="bg-zinc-950/95 border border-amber-500/50 p-2.5 sm:p-3 rounded-xl flex items-center justify-between gap-2 shadow-xl backdrop-blur-md">
             <div className="flex items-center space-x-2 text-left">
-              <div className="w-7 h-7 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
-                <PlayCircle className="w-4 h-4 text-emerald-400 animate-pulse" />
+              <div className="w-8 h-8 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0 text-amber-400">
+                <PlayCircle className="w-4 h-4 animate-pulse" />
               </div>
               <div>
-                <h4 className="text-xs font-bold text-white flex items-center space-x-1">
-                  <span className="text-amber-400 font-black">{t.sitting_out}</span>
+                <h4 className="text-xs font-bold text-white flex items-center space-x-1.5">
+                  <span className="text-amber-400 font-black">{t.sit_out_auto_title}</span>
                   <span className="text-[10px] font-normal text-zinc-400">
-                    ({lang === 'az' ? 'Cari əl bitdikdən sonra daxil olacaqsınız' : 'Waiting for next hand'})
+                    ({lang === 'az' ? 'Masa durğunluğunun qarşısı alındı' : 'Prevented table stagnation'})
                   </span>
                 </h4>
-                <p className="text-[10px] text-zinc-400 leading-tight">
-                  {lang === 'az'
-                    ? 'Masadakı cari əl yekunlaşan kimi növbəti ələ avtomatik başlayacaqsınız.'
-                    : 'You will automatically join the game once the ongoing hand completes.'}
+                <p className="text-[10.5px] text-zinc-300 leading-tight mt-0.5">
+                  {(humanPlayer.consecutiveMissedTurns || 0) >= 3
+                    ? t.sit_out_auto_desc
+                    : (lang === 'az'
+                        ? 'Masadakı cari əl yekunlaşan kimi növbəti ələ avtomatik başlayacaqsınız.'
+                        : 'You will join the next hand as soon as it begins.')}
                 </p>
               </div>
             </div>
             <button
               type="button"
               onClick={handleJoinTable}
-              className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-zinc-950 font-black text-xs shadow-lg flex items-center justify-center space-x-1.5 transition-all transform active:scale-95 cursor-pointer ring-1 ring-emerald-400/40 shrink-0"
+              id="im_back_rejoin_table_btn"
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-zinc-950 font-black text-xs shadow-lg flex items-center justify-center space-x-1.5 transition-all transform active:scale-95 cursor-pointer ring-1 ring-emerald-400/50 shrink-0"
             >
-              <PlayCircle className="w-3.5 h-3.5 text-zinc-950" />
-              <span>{t.join_table_btn}</span>
+              <PlayCircle className="w-4 h-4 text-zinc-950" />
+              <span>{t.sit_out_im_back}</span>
             </button>
           </div>
         ) : (
@@ -1863,20 +3251,47 @@ export const PokerTable: React.FC<PokerTableProps> = ({
             lang={lang}
             preAction={preAction}
             onSetPreAction={setPreAction}
+            sitOutNextHand={sitOutNextHand}
+            onToggleSitOutNextHand={setSitOutNextHand}
+            turnTimeLeft={turnTimeLeft}
+            maxTimeBank={table.timeBank || 15}
           />
         )}
 
-        {/* Bottom Options: Chat Toggle */}
-        <div className="flex items-center justify-end px-1">
+        {/* Bottom Options: Quick Phrases Bar & Chat Toggle */}
+        <div className="flex items-center justify-between gap-2 px-1">
+          {/* Direct 1-Click Quick Phrases shortcuts */}
+          <div className="hidden sm:flex items-center space-x-1.5 overflow-x-auto scrollbar-none py-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 flex items-center space-x-1 mr-1">
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span>{lang === 'az' ? 'Tez Fraza:' : 'Quick:'}</span>
+            </span>
+            {QUICK_CHAT_PHRASES.slice(0, 4).map((phrase) => (
+              <button
+                key={`quick_bar_${phrase.id}`}
+                type="button"
+                onClick={() => {
+                  soundManager.playButtonClick();
+                  handleSendMessage(getQuickPhraseText(phrase, lang));
+                }}
+                className="px-2.5 py-1.5 rounded-xl bg-zinc-900/90 hover:bg-amber-500/20 hover:border-amber-400/60 border border-zinc-800 text-[11px] font-semibold text-zinc-300 hover:text-amber-300 whitespace-nowrap transition-all shadow-sm active:scale-95 cursor-pointer flex items-center space-x-1"
+              >
+                <span>{getQuickPhraseText(phrase, lang)}</span>
+              </button>
+            ))}
+          </div>
+
           {/* Table Chat Widget */}
-          <TableChat
-            messages={chatMessages}
-            onSendMessage={handleSendMessage}
-            onSendEmoji={handleSendEmoji}
-            lang={lang}
-            isOpen={isChatOpen}
-            onToggle={() => setIsChatOpen(!isChatOpen)}
-          />
+          <div className="ml-auto">
+            <TableChat
+              messages={chatMessages}
+              onSendMessage={handleSendMessage}
+              onSendEmoji={handleSendEmoji}
+              lang={lang}
+              isOpen={isChatOpen}
+              onToggle={() => setIsChatOpen(!isChatOpen)}
+            />
+          </div>
         </div>
       </div>
 
@@ -2145,6 +3560,26 @@ export const PokerTable: React.FC<PokerTableProps> = ({
           </div>
         </div>
       )}
+
+      {/* Player Note & Color Tagging Modal (Persisted in Local Storage) */}
+      <PlayerNoteModal
+        player={noteTargetPlayer}
+        isOpen={!!noteTargetPlayer}
+        onClose={() => setNoteTargetPlayer(null)}
+        lang={lang}
+        onNoteUpdated={handleRefreshPlayerNotes}
+      />
+
+      {/* Session Table Stats & HUD Modal */}
+      <TableStatsModal
+        isOpen={showStatsModal}
+        onClose={() => setShowStatsModal(false)}
+        handHistory={handHistory}
+        currentUserId={currentUser.id}
+        currentUsername={currentUser.username}
+        lang={lang}
+        tableName={table.name}
+      />
     </div>
   );
 };

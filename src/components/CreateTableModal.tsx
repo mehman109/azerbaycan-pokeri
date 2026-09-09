@@ -42,7 +42,7 @@ export const CreateTableModal: React.FC<CreateTableModalProps> = ({
     bb: 2,
     tier: 'low',
   });
-  const [timeBank, setTimeBank] = useState<number>(15);
+  const [timeBank, setTimeBank] = useState<number>(30);
   const [feltColor, setFeltColor] = useState<FeltColor>('emerald');
   const [copiedLink, setCopiedLink] = useState(false);
 
